@@ -1,0 +1,57 @@
+#+title: Project and ARADR Init DSL
+
+* Purpose
+
+Projects and workflow policy are trusted Common Lisp init configuration, not LLM-generated data.
+
+Example shape only:
+
+#+begin_src lisp
+(define-research-repository main-research
+  :path "~/starintel/starintel-auto-research"
+  :artifact-store :org-roam
+  :event-store :jsonl
+  :forgejo (:base-url "https://git.example"
+            :repository "starintel-labs/starintel-auto-research"))
+
+(define-budget normal-research
+  :wall-clock-seconds 7200
+  :input-tokens 1000000
+  :output-tokens 100000
+  :max-candidates 5
+  :max-active-branches 3
+  :max-depth 4)
+
+(define-project prolog-rlm
+  :repository (:forgejo "lost-rob0t/prolog-rlm")
+  :research-repository main-research
+  :method aradr
+  :roam-project "prolog-rlm"
+  :budget normal-research
+  :rlm (:mode :direct :profile :research)
+  :incoming (:forgejo-label "research" :api t))
+#+end_src
+
+* DSL semantics
+
+A project should resolve at least:
+
+- project ID/display name;
+- source repository;
+- canonical research repository;
+- Roam subtree slug;
+- ARADR method;
+- RLM profile/mode;
+- default budget;
+- source policy/capabilities;
+- incoming Forgejo request rules.
+
+* Templates
+
+Support lightweight reusable defaults if clean, e.g. a =starintel-software= project template. Do not overbuild inheritance.
+
+* Trusted boundary
+
+The init file may execute trusted CL.
+
+Never =eval= issue bodies, HTTP input, web content, Org artifacts, or LLM output.

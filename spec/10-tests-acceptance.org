@@ -1,0 +1,83 @@
+#+title: Tests and Acceptance
+
+* Unit/integration tests
+
+Test at least:
+
+** Project DSL
+- project loading/mapping
+- duplicate IDs rejected
+- bad repository references rejected
+- project -> Roam subtree
+- project -> Forgejo repository
+
+** RLM harness
+- fake structured transport
+- tool registration/schema
+- argument validation
+- direct mode
+- tool execution
+- result/usage/error capture
+- cancellation
+
+** Org/contracts
+- generated/modified artifacts pass the CURRENT Auto Research validators
+- lifecycle != approval
+- partial approval metadata rejected
+- explicit approval/rejection persists correctly
+
+** Multi-project
+- project isolation
+- independent implementation slots
+- cross-project writes rejected
+
+** Forgejo
+- API request creates one issue/request
+- returned webhook does not duplicate it
+- native Forgejo issue creates a request
+- same issue number across repos does not collide
+- retries are idempotent
+
+** API/auth
+- auth/capabilities
+- projects
+- submit research
+- requests/runs
+- artifacts/source
+- search
+- approval/promotion guards
+- events/SSE
+- cancellation
+- dashboard
+
+** ARADR
+- allowed candidate transitions
+- invalid transitions rejected
+- deterministic veto blocks promotion
+- run may complete without promotion
+- implementation never auto-starts
+
+* Vertical-slice acceptance
+
+Demonstrate locally with mocked Forgejo/LLM where appropriate:
+
+#+begin_example
+load CL runtime + init DSL
+ -> start web API
+ -> authenticated POST research
+ -> Forgejo adapter creates issue
+ -> ARDR issue transaction created
+ -> research run/event created
+ -> ARADR schedules semantic work
+ -> CL harness invokes Prolog-RLM :direct (fake allowed in tests)
+ -> semantic tools persist validator-clean Org research
+ -> API exposes run/artifact/events
+ -> SSE emits progress
+ -> approval remains explicit/PENDING
+#+end_example
+
+Also demonstrate a Forgejo-originated research issue follows the same runtime and is created exactly once.
+
+* Completion report
+
+Report exact files changed, interfaces added, commands/tests executed, observed results, and remaining gaps. Never claim green checks that were not run.

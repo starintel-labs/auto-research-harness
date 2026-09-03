@@ -1,0 +1,70 @@
+#+title: Security, Capabilities, Events
+
+* Principals
+
+Represent authenticated callers as principals with explicit capabilities, e.g.:
+
+- research:read
+- research:submit
+- research:cancel
+- research:approve
+- design:approve
+- runtime:inspect
+- runtime:admin
+
+Routes/application operations check capabilities. Distinguish authentication failure from authorization failure.
+
+* Secrets
+
+Do not commit Forgejo/model/API credentials. Do not log tokens or secrets. Do not expose them through runtime endpoints.
+
+* Filesystem
+
+Any generic filesystem tools must:
+
+- resolve beneath configured roots;
+- reject =../= escapes;
+- reject unauthorized absolute paths;
+- reject symlink escapes;
+- avoid arbitrary shell by default.
+
+Canonical research/design writes should occur through controlled semantic operations/promotion gates.
+
+* Event model
+
+Preserve append-only/replay semantics. Useful domain event types include:
+
+#+begin_example
+request.received
+request.claimed
+forgejo.issue.created
+forgejo.issue.linked
+run.created
+run.started
+run.completed
+run.failed
+run.cancelled
+stage.started
+stage.completed
+stage.blocked
+candidate.created
+candidate.evaluated
+candidate.promoted
+candidate.pruned
+rlm.started
+rlm.completed
+rlm.failed
+tool.called
+tool.succeeded
+tool.failed
+artifact.created
+artifact.updated
+approval.required
+approval.recorded
+#+end_example
+
+Do not store full hidden prompts by default. Store enough execution metadata to inspect token usage, timing, tools, errors, and provenance.
+
+* Canonical checkout
+
+The configured Auto Research checkout is authoritative. Do not silently clone/substitute another checkout, reset/stash/clean unrelated human work, or treat remote issue prose as the canonical research corpus.

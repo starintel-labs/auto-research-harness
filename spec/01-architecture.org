@@ -1,0 +1,54 @@
+#+title: Auto Research Common Lisp Architecture
+
+* Boundary
+
+Auto Research is a reusable Common Lisp application/runtime.
+
+#+begin_example
+website / CLI / cron / Agent Zero / Zara / StarIntel
+                    |
+                    v
+          Common Lisp application API
+                    |
+          +---------+----------+
+          |                    |
+        ARADR             Project DSL
+          |
+   +------+------+----------------+
+   |             |                |
+Forgejo       Org-roam        Event ledgers
+   |
+   | semantic work required
+   v
+CL Prolog-RLM harness
+   |
+Prolog-RLM :direct
+   |
+LLM
+#+end_example
+
+* Rules
+
+- Callers do not own workflow semantics.
+- HTTP handlers do not own workflow semantics.
+- Prolog-RLM does not own Auto Research.
+- ARADR decides when semantic work is required.
+- Common Lisp owns stable workflow, serialization, validation, capabilities, project configuration, and context construction.
+- The LLM receives a bounded task/context and a narrow semantic tool set.
+
+* Reuse target
+
+Keep these usable by StarIntel later:
+
+- CL Prolog-RLM harness;
+- RLM tool-definition system;
+- project DSL;
+- ARADR runtime;
+- request normalization;
+- capability/principal model;
+- context builder;
+- event/replay layer;
+- artifact/search protocols;
+- Forgejo issue identity/idempotency.
+
+Auto Research-specific adapters are Org-roam layout, ARDR issue transactions, current approval metadata, and research-repo conventions.

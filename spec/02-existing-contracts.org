@@ -1,0 +1,89 @@
+#+title: Existing Auto Research Contracts
+
+* Inspect source first
+
+Before implementing, inspect current HEAD of =lost-rob0t/starintel-auto-research=, especially:
+
+- =scripts/_roamlib.py=
+- =scripts/save-research.py=
+- =scripts/search.py=
+- =scripts/research_queue.py=
+- =scripts/research_approval_migration.py=
+- =scripts/validate-docs.py=
+- =scripts/implement.py=
+- =scripts/mark-design.py=
+- =scripts/sync.py=
+- =skills/save-research/SKILL.md=
+- =AGENTS.md=
+- =roam/design/auto-research/STAR-RESEARCH-PIPELINE-001-adaptive-research-dag-evaluation-harness.org=
+
+Treat these as executable specification. Preserve current behavior unless a current source explicitly supersedes it.
+
+* Canonical layout
+
+#+begin_example
+roam/
+  research/<project>/
+  research/ardr-issues/
+  design/<project>/
+  implement/<project>/
+  indexes/<project>/
+  .implemented
+  .rejected
+  .research-runs
+  .research-candidates
+#+end_example
+
+Do not migrate to =projects/<project>/roam/=. Project identity is the mirrored subtree name.
+
+* Research Org metadata
+
+Preserve the current durable Org schema, including stable =:ID:= and current headers such as:
+
+#+begin_example
+#+title:
+#+description:
+#+status:
+#+approval_schema: adard.research-approval.v1
+#+approval_state:
+#+approval_actor:
+#+approval_evidence:
+#+approval_base_commit:
+#+approval_base_blob:
+#+approval_decided_at:
+#+created:
+#+last_modified:
+#+filetags:
+#+end_example
+
+Preserve current Approval Table, Changelog, Objective, Findings, Sources, repository/commit review, affected-design and next-action semantics.
+
+* Approval invariant
+
+Lifecycle and approval are different facts.
+
+=#+status: REVIEW= does not mean =#+approval_state: APPROVED=.
+
+Canonical approval states remain:
+
+- PENDING
+- APPROVED
+- REJECTED
+
+Partial canonical approval metadata is invalid.
+
+* Issue research transaction invariant
+
+Every issue-backed research request/pass must have a durable transaction node under:
+
+#+begin_example
+roam/research/ardr-issues/ARDR-ISSUE-<number>-<slug>.org
+#+end_example
+
+The transaction may link an existing canonical domain research node. Do not duplicate domain research merely because another issue references it.
+
+* Implementation slots
+
+Each project has zero or one active implementation design under =roam/implement/<project>/=. Independent projects may proceed concurrently.
+
+Do not auto-activate implementation after research/design promotion.

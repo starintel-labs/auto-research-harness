@@ -1,0 +1,67 @@
+#+title: Common Lisp Prolog-RLM Harness
+
+* Boundary
+
+=cl-prolog-rlm= is generic. It knows nothing about Auto Research, ARADR, Org, Forgejo, or the website.
+
+* Public API
+
+Provide capabilities equivalent to:
+
+#+begin_src lisp
+(rlm:run ...)
+(rlm:cancel ...)
+(rlm:status ...)
+(rlm:make-context ...)
+(rlm:register-tool ...)
+#+end_src
+
+A run should return structured state including run ID, status, result, tool calls, token usage, events/errors, and timing.
+
+* Transport
+
+Inspect current Prolog-RLM before coding. Use its actual supported machine interface.
+
+For v1 prefer:
+
+#+begin_example
+Common Lisp -> Prolog-RLM subprocess -> structured protocol
+#+end_example
+
+Hide transport behind a protocol so a future CFFI implementation can replace it.
+
+* Mode
+
+Only implement/use =:direct= in this slice. Keep extension points for symbolic modes without implementing them.
+
+* Tool abstraction
+
+Provide a CL tool-definition abstraction that can derive model-visible schemas and enforce:
+
+- argument validation;
+- return representation;
+- capability checks;
+- side-effect classification;
+- timeout;
+- audit behavior.
+
+* Auto Research semantic tools
+
+Auto Research should primarily expose semantic tools, e.g.:
+
+- search-research
+- read-research-node
+- read-design-node
+- repository-read
+- record-source
+- record-finding
+- record-counterevidence
+- record-falsifier
+- record-unresolved-question
+- record-research-pass
+- submit-candidate
+- record-review
+
+CL owns canonical Org serialization. The LLM should not manually reproduce headers/tables/layout on each call.
+
+Generic low-level file tools may exist in the generic harness but must be root-scoped and are not the primary Auto Research interface.

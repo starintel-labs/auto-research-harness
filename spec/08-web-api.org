@@ -1,0 +1,110 @@
+#+title: Website Research API
+
+* Rule
+
+The website HTTP API is a thin authenticated projection over the CL application API.
+
+Handlers must not directly:
+
+- format/write Org;
+- mutate ledgers;
+- call Prolog-RLM;
+- implement ARADR transitions;
+- implement Forgejo business rules.
+
+* Base
+
+Use =/api/v1=.
+
+* Runtime
+
+#+begin_example
+GET /api/v1/health
+GET /api/v1/ready
+GET /api/v1/runtime
+#+end_example
+
+* Projects
+
+#+begin_example
+GET /api/v1/projects
+GET /api/v1/projects/{project}
+GET /api/v1/projects/{project}/research
+GET /api/v1/projects/{project}/designs
+GET /api/v1/projects/{project}/runs
+GET /api/v1/projects/{project}/issues
+GET /api/v1/projects/{project}/artifacts
+#+end_example
+
+Projects are defined by trusted init DSL. Do not require POST project creation in v1.
+
+* Submit research
+
+#+begin_example
+POST /api/v1/projects/{project}/research
+#+end_example
+
+Body minimally contains a bounded question and optional named budget profile. Return =202 Accepted= with request ID, run ID, status and Forgejo issue reference.
+
+* Requests and runs
+
+#+begin_example
+GET  /api/v1/requests
+GET  /api/v1/requests/{id}
+GET  /api/v1/runs
+GET  /api/v1/runs/{id}
+POST /api/v1/runs/{id}/cancel
+GET  /api/v1/runs/{id}/events
+GET  /api/v1/runs/{id}/events/stream
+GET  /api/v1/runs/{id}/candidates
+GET  /api/v1/runs/{id}/artifacts
+GET  /api/v1/runs/{id}/reviews
+GET  /api/v1/runs/{id}/executions
+#+end_example
+
+Use SSE for run progress; stream domain events, not raw model stdout.
+
+* Candidates
+
+#+begin_example
+GET /api/v1/candidates/{id}
+GET /api/v1/candidates/{id}/reviews
+#+end_example
+
+No unrestricted public candidate creation endpoint.
+
+* Artifacts/search
+
+#+begin_example
+GET /api/v1/artifacts/{id}
+GET /api/v1/artifacts/{id}/source
+GET /api/v1/search?q=...&project=...
+#+end_example
+
+Structured artifact endpoint returns parsed metadata; =/source= returns canonical Org.
+
+* Approval/promotion
+
+#+begin_example
+POST /api/v1/artifacts/{id}/approval
+POST /api/v1/artifacts/{id}/promote
+#+end_example
+
+Approval and promotion are different operations. Promotion runs ARADR guards and cannot force state directly.
+
+* Forgejo webhook
+
+#+begin_example
+POST /api/v1/hooks/forgejo
+#+end_example
+
+Normalize verified webhook events into the same CL request/application layer.
+
+* Dashboard
+
+#+begin_example
+GET /api/v1/dashboard
+GET /api/v1/projects/{project}/dashboard
+#+end_example
+
+These are read models only.

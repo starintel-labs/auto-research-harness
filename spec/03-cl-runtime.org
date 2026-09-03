@@ -1,0 +1,82 @@
+#+title: Common Lisp Runtime
+
+* Suggested system boundaries
+
+Use clean ASDF/package boundaries equivalent to:
+
+- =cl-prolog-rlm=
+- =starintel-aradr=
+- =starintel-research-core=
+- =starintel-auto-research=
+- =starintel-auto-research-web=
+
+Exact package names may follow the website repo's existing conventions.
+
+* Domain objects
+
+Model first-class concepts for at least:
+
+- project
+- research repository
+- research request
+- research run
+- research candidate
+- review
+- promotion decision
+- budget
+- principal
+- external issue reference
+
+Do not create a second incompatible run/candidate schema. Serialize/project the existing approved run/candidate contracts.
+
+* Core protocols
+
+Provide reusable generic operations for concepts equivalent to:
+
+#+begin_src lisp
+find-project
+submit-research
+get-request
+get-run
+list-runs
+cancel-run
+search-artifacts
+read-artifact
+write-artifact
+record-event
+replay-events
+record-approval
+promote
+process-forgejo-event
+run-pending
+#+end_src
+
+CLI and HTTP must call these operations rather than duplicate logic.
+
+* Storage adapters
+
+Initial Auto Research adapters:
+
+#+begin_example
+artifact-store -> existing Org-roam corpus
+event-store    -> existing append-only ledgers
+issue-source   -> Forgejo
+research-index -> current lexical Org search semantics
+#+end_example
+
+These interfaces must be replaceable later by StarIntel-native stores/search/actors.
+
+* Context builder
+
+Implement a bounded CL context builder per run/stage. Select only relevant:
+
+- project metadata;
+- research question;
+- existing research;
+- approved decisions;
+- rejected alternatives when useful;
+- current candidate state;
+- budget;
+- stage requirements.
+
+Never send the whole corpus or an ever-growing transcript by default.

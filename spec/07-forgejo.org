@@ -1,0 +1,61 @@
+#+title: Forgejo Request Plane
+
+* Adapter
+
+Use Forgejo as the issue/request collaboration plane. Because the host runtime is CL, use a maintained CL HTTP stack against Forgejo's documented API if no suitable maintained CL Forgejo client supports the required writes.
+
+Keep all Forgejo calls behind a small adapter:
+
+- get repository
+- get/list issue
+- create issue
+- update issue
+- comment issue
+
+* Qualified issue identity
+
+Issue number alone is not globally unique.
+
+Represent identity with:
+
+- Forgejo instance;
+- repository identity;
+- issue number.
+
+Use a stable idempotency key such as:
+
+#+begin_example
+forgejo:<instance>:<repository-id>:<issue-number>
+#+end_example
+
+* API-origin request
+
+#+begin_example
+website API request
+ -> canonical request
+ -> create issue in configured research repo
+ -> create/link ARDR issue transaction
+ -> create run
+ -> ARADR
+#+end_example
+
+* Forgejo-origin request
+
+#+begin_example
+project issue receives configured research trigger
+ -> webhook
+ -> resolve repo to project
+ -> lookup qualified issue identity
+ -> create request/transaction only if absent
+ -> ARADR
+#+end_example
+
+* Deduplication
+
+An API-created issue will return through the webhook. That webhook must resolve the existing request and do nothing duplicative.
+
+Same issue number in two repositories must not collide.
+
+* Auth
+
+Forgejo webhook verification is separate from normal website API authentication.

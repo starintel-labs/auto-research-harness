@@ -1,0 +1,60 @@
+#+title: ARADR Runtime Semantics
+
+* Ownership
+
+ARADR workflow semantics live in Common Lisp, not prompts.
+
+Model semantic work only when CL schedules it.
+
+* High-level method
+
+Use ARADR semantics around stages equivalent to:
+
+#+begin_example
+REQUEST
+  -> RESEARCH
+  -> ADVERSARIAL REVIEW
+  -> ANALYSIS / RESOLUTION
+  -> DESIGN
+  -> DESIGN REVIEW
+  -> PROMOTION GATE
+#+end_example
+
+Do not let an LLM choose arbitrary stage transitions.
+
+* Existing candidate lifecycle
+
+Preserve the approved existing candidate lifecycle unless current source supersedes it:
+
+#+begin_example
+QUEUED
+ -> EXPLORING
+ -> PROPOSING
+ -> VALIDATING
+ -> VIRTUAL-REVIEW
+ -> EVALUATED
+ -> PROMOTED | PRUNED | BLOCKED | UNRESOLVED
+#+end_example
+
+Invalid transitions fail closed.
+
+* Deterministic checks
+
+Enforce in CL where possible:
+
+- required fields;
+- valid parent IDs;
+- evidence/citation requirements;
+- counterevidence/falsifier requirements;
+- budget/scope limits;
+- deterministic vetoes;
+- canonical-write ownership;
+- promotion requirements.
+
+Do not spend LLM calls on checks ordinary code can perform.
+
+* Human gates
+
+Research/design promotion follows current approval policy.
+
+Implementation remains separately human/operator authorized. Never infer implementation approval from research/design status.
