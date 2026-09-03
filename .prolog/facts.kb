@@ -1,0 +1,21 @@
+% Ground facts and machine observations for this worktree.
+task('auto-research-cl-runtime').
+repo_state('e4e8cc3009d76ea892aa535b99cbafbdb4fe236a', 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855').
+research_required(false).
+
+% Claimed requirements for the Auto Research CL runtime slice.
+% These are claims derived from spec/*.org; they are only proven by
+% machine-recorded observations below. Never self-certify.
+claimed(requirement, rlm_systems_load, 'cl-prolog-rlm loads in SBCL').
+claimed(requirement, aradr_system_load, 'starintel-aradr loads in SBCL').
+claimed(requirement, core_system_load, 'starintel-research-core loads in SBCL').
+claimed(requirement, auto_research_system_load, 'starintel-auto-research loads in SBCL').
+claimed(requirement, web_system_load, 'starintel-auto-research-web loads in SBCL').
+claimed(requirement, cl_tests_pass, 'fiveam suite for all CL systems passes').
+claimed(requirement, org_validator_clean, 'generated Org corpus passes scripts/validate-docs.py of the canonical repo').
+claimed(requirement, lifecycle_separate_from_approval, 'lifecycle status and approval_state stay independent dimensions').
+claimed(requirement, partial_approval_rejected, 'partial canonical approval metadata is rejected').
+claimed(requirement, invalid_candidate_transitions_rejected, 'candidate state machine fails closed on invalid transitions').
+claimed(requirement, deterministic_vetoes, 'promotion is blocked by deterministic vetoes').
+claimed(requirement, forgejo_idempotency, 'same qualified issue identity never creates duplicate requests').
+claimed(requirement, nix_build, 'nix build observed succeeding for the flake').
