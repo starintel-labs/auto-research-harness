@@ -1,0 +1,20 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  nix-build:
+    name: nix build + fiveam suite
+    runs-on: nix
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: build (checkPhase runs the full fiveam suite)
+        run: nix build -L
+
+      - name: flake check
+        run: nix flake check
