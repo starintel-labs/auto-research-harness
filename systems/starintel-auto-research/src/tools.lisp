@@ -9,28 +9,26 @@
 
 (in-package #:starintel-auto-research)
 
+(defun schema-key (name)
+  (cond
+    ((keywordp name) (string-downcase (symbol-name name)))
+    ((symbolp name) (string-downcase (symbol-name name)))
+    (t name)))
+
 (defun jschema (properties &optional required)
-  "JSON-schema object: PROPERTIES is a plist of (name . type-string)."
+  "JSON-schema object: PROPERTIES is a flat plist of name type-string
+pairs; REQUIRED is a list of property names."
   (let ((props (make-hash-table :test #'equal)))
     (loop :for (name type) :on properties :by #'cddr
-          :do (setf (gethash (if (keywordp name)
-                                 (string-downcase (symbol-name name))
-                                 name)
-                             props)
-                    (if (consp type) type (make-hash-table :test #'equal))))
-    ;; fix simple string types
-    (loop :for (name type) :on properties :by #'cddr
-          :when (stringp type)
-            :do (setf (gethash (string-downcase (symbol-name name)) props)
+          :when (and name type)
+            :do (setf (gethash (schema-key name) props)
                       (alexandria:plist-hash-table (list "type" type) :test #'equal)))
     (let ((schema (make-hash-table :test #'equal)))
       (setf (gethash "type" schema) "object"
             (gethash "properties" schema) props)
       (when required
         (setf (gethash "required" schema)
-              (mapcar (lambda (f)
-                        (if (symbolp f) (string-downcase (symbol-name f)) f))
-                      required)))
+              (mapcar #'schema-key required)))
       schema)))
 
 (defun require-string-field (args field)
@@ -234,7 +232,7 @@ unauthorized absolute paths, and symlink escapes."
                    (probe-file path)
                    (probe-file (merge-pathnames path root)))))
     (unless (and full (uiop:file-exists-p full)
-                 (uiop:subpathp full root))
+                 (uiop:subpathp full (pathname root)))
       (error 'research-core:validation-error
              :message (format nil "path is outside the configured root: ~a" path)))
     (when (uiop:pathname-equal (truename full) full)
@@ -253,13 +251,13 @@ unauthorized absolute paths, and symlink escapes."
 (defun ensure-path-in-store%/ (store path)
   (let* ((root (org-roam-root store))
          (full (merge-pathnames path root)))
-    (unless (uiop:subpathp full root)
+    (unless (uiop:subpathp full (pathname root))
       (error 'research-core:validation-error :message "path escapes corpus"))
     (unless (probe-file full)
       (error 'research-core:validation-error
              :message (format nil "missing artifact: ~a" path)))
     (unless (equal (truename full) (truename root))
-      (unless (uiop:subpathp (truename full) (truename root))
+      (unless (uiop:subpathp (truename full) (truename (pathname root)))
         (error 'research-core:validation-error
                :message (format nil "symlink escape rejected: ~a" path))))
     full))

@@ -23,29 +23,16 @@
                          (when code-p (list "code" code)))
                  :test #'equal)))
 
-(defun route (pattern)
-  "Match REQUEST-PATH-INFO against a /api/v1 route PATTERN with {param}
-segments. Returns the param values or nil."
-  (let* ((parts (ppcre:split "/" pattern))
-         (path (hunchentoot:script-name*)))
-    (when path
-      (let ((actual (ppcre:split "/" path)))
-        (when (= (length parts) (length actual))
-          (let ((params (make-hash-table :test #'equal))
-                (ok t))
-            (mapc (lambda (expected got)
-                    (cond
-                      ((ppcre:scan "^\\{.*\\}$" expected)
-                       (setf (gethash (subseq expected 1 (1- (length expected))) params)
-                             got))
-                      ((not (string= expected got))
-                       (setf ok nil))))
-                  parts actual)
-            (when ok params)))))))
+(defun route-params (pattern path)
+  "Match PATH against PATTERN; returns the list of captured group values
+or nil. Used by handle-api clauses."
+  (multiple-value-bind (match groups)
+      (ppcre:scan-to-strings pattern path)
+    (when match (coerce groups 'list))))
 
 (defmacro with-auth ((capability) &body body)
   `(handler-case
-       (progn ,@body)
+       (progn (require-capability ,capability) ,@body)
      (rc:authentication-error (condition)
        (json-error 401 (format nil "~a" condition)))
      (rc:authorization-error (condition)
@@ -131,48 +118,47 @@ segments. Returns the param values or nil."
      (with-auth (:|research:read|)
        (unless (eq method :get) (return-from handle-api (json-error 405 "method not allowed")))
        (json-ok (projects-view))))
-    ((ppcre:register-groups-bind (project-id)
-         ("^/api/v1/projects/([^/]+)$" path))
-     (with-auth (:|research:read|)
-       (unless (eq method :get) (return-from handle-api (json-error 405 "method not allowed")))
-       (project-config-or-404 project-id)
-       (json-ok (project-view project-id))))
-    ((ppcre:register-groups-bind (project-id resource)
-         ("^/api/v1/projects/([^/]+)/(research|designs|runs|issues|artifacts|dashboard)$" path))
-     (project-resource project-id resource method))
-    ;; submit research ---------------------------------------------------
-    ((and (ppcre:register-groups-bind (project-id)
-             ("^/api/v1/projects/([^/]+)/research$" path))
-          (eq method :post))
-     (handle-submit-research project-id))
+    ((route-params "^/api/v1/projects/([^/]+)$" path)
+     (destructuring-bind (project-id) (route-params "^/api/v1/projects/([^/]+)$" path)
+       (with-auth (:|research:read|)
+         (unless (eq method :get) (return-from handle-api (json-error 405 "method not allowed")))
+         (project-config-or-404 project-id)
+         (json-ok (project-view project-id)))))
+    ((route-params "^/api/v1/projects/([^/]+)/(research|designs|runs|issues|artifacts|dashboard)$" path)
+     (destructuring-bind (project-id resource)
+         (route-params "^/api/v1/projects/([^/]+)/(research|designs|runs|issues|artifacts|dashboard)$" path)
+       (project-resource project-id resource method)))
     ;; requests and runs --------------------------------------------------
     ((and (string= path "/api/v1/requests") (eq method :get))
      (with-auth (:|research:read|)
        (json-ok (requests-view))))
-    ((ppcre:register-groups-bind (request-id)
-         ("^/api/v1/requests/([^/]+)$" path))
-     (with-auth (:|research:read|)
-       (unless (eq method :get) (return-from handle-api (json-error 405 "method not allowed")))
-       (let ((request (ar:ar-get-request *runtime* request-id)))
-         (unless request (return-from handle-api (json-error 404 "unknown request")))
-         (json-ok (request-view request)))))
+    ((route-params "^/api/v1/requests/([^/]+)$" path)
+     (destructuring-bind (request-id) (route-params "^/api/v1/requests/([^/]+)$" path)
+       (with-auth (:|research:read|)
+         (unless (eq method :get) (return-from handle-api (json-error 405 "method not allowed")))
+         (let ((request (ar:ar-get-request *runtime* request-id)))
+           (unless request (return-from handle-api (json-error 404 "unknown request")))
+           (json-ok (request-view request))))))
     ((and (string= path "/api/v1/runs") (eq method :get))
      (with-auth (:|research:read|)
        (json-ok (runs-view))))
-    ((ppcre:register-groups-bind (run-id action)
-         ("^/api/v1/runs/([^/]+)(?:/(cancel|events|events/stream|candidates|artifacts|reviews|executions))?$" path))
-     (handle-run-resource run-id action method))
+    ((route-params "^/api/v1/runs/([^/]+)(?:/(cancel|events|events/stream|candidates|artifacts|reviews|executions))?$" path)
+     (destructuring-bind (run-id &optional action)
+         (route-params "^/api/v1/runs/([^/]+)(?:/(cancel|events|events/stream|candidates|artifacts|reviews|executions))?$" path)
+       (handle-run-resource run-id action method)))
     ;; candidates ---------------------------------------------------------
-    ((ppcre:register-groups-bind (candidate-id sub)
-         ("^/api/v1/candidates/([^/]+)(/reviews)?$" path))
-     (with-auth (:|research:read|)
-       (json-ok (candidate-view candidate-id (not (null sub))))))
+    ((route-params "^/api/v1/candidates/([^/]+)(/reviews)?$" path)
+     (destructuring-bind (candidate-id &optional sub)
+         (route-params "^/api/v1/candidates/([^/]+)(/reviews)?$" path)
+       (with-auth (:|research:read|)
+         (json-ok (candidate-view candidate-id (not (null sub)))))))
     ;; artifacts and search ----------------------------------------------
-    ((ppcre:register-groups-bind (artifact-id source-p)
-         ("^/api/v1/artifacts/([^/]+)(/source)?$" path))
-     (with-auth (:|research:read|)
-       (unless (eq method :get) (return-from handle-api (json-error 405 "method not allowed")))
-       (handle-artifact artifact-id (not (null source-p)))))
+    ((and (route-params "^/api/v1/artifacts/(.+?)(/source)?$" path)
+          (eq method :get))
+     (destructuring-bind (artifact-id &optional source-p)
+         (route-params "^/api/v1/artifacts/(.+?)(/source)?$" path)
+       (with-auth (:|research:read|)
+         (handle-artifact artifact-id (not (null source-p))))))
     ((and (string= path "/api/v1/search") (eq method :get))
      (with-auth (:|research:read|)
        (let ((q (hunchentoot:get-parameter "q"))
@@ -180,10 +166,11 @@ segments. Returns the param values or nil."
          (unless q (return-from handle-api (json-error 400 "missing q")))
          (json-ok (search-view q project)))))
     ;; approval and promotion --------------------------------------------
-    ((and (ppcre:register-groups-bind (artifact-id action)
-             ("^/api/v1/artifacts/([^/]+)/(approval|promote)$" path))
+    ((and (route-params "^/api/v1/artifacts/(.+?)/(approval|promote)$" path)
           (eq method :post))
-     (handle-artifact-action artifact-id action))
+     (destructuring-bind (artifact-id action)
+         (route-params "^/api/v1/artifacts/(.+?)/(approval|promote)$" path)
+       (handle-artifact-action artifact-id action)))
     ;; dashboard ---------------------------------------------------------
     ((string= path "/api/v1/dashboard")
      (with-auth (:|research:read|)
@@ -242,7 +229,7 @@ segments. Returns the param values or nil."
 (defun handle-artifact (artifact-id source-p)
   (let* ((store (ar:ar-store *runtime*))
          (path (merge-pathnames artifact-id (ar:org-roam-root store))))
-    (unless (and (uiop:subpathp path (ar:org-roam-root store))
+    (unless (and (uiop:subpathp path (pathname (ar:org-roam-root store)))
                  (probe-file path))
       (return-from handle-artifact (json-error 404 "unknown artifact")))
     (if source-p
@@ -300,9 +287,13 @@ carry the configured secret."
          (payload (and body (jz:parse body))))
     (unless payload
       (return-from handle-forgejo-hook (json-error 400 "missing payload")))
-    (let ((table (if (hash-table-p payload) payload (make-hash-table :test #'equal))))
-      (unless (string= (gethash "secret" table "")
-                       (or (uiop:getenv "FORGEJO_WEBHOOK_SECRET") ""))
+    (let ((table (if (hash-table-p payload) payload (make-hash-table :test #'equal)))
+          (configured (uiop:getenv "FORGEJO_WEBHOOK_SECRET")))
+      ;; verification fails closed: an unconfigured secret rejects every
+      ;; webhook, and the presented secret must equal the configured one
+      (unless (and configured
+                   (plusp (length configured))
+                   (string= (gethash "secret" table "") configured))
         (return-from handle-forgejo-hook (json-error 401 "webhook verification failed")))
       (handler-case
           (multiple-value-bind (result created-p)
@@ -445,24 +436,24 @@ carry the configured secret."
 
 ;;; --------------------------------------------------------------- SSE
 
-(defun sse-events (run-id)
-  "Stream DOMAIN events for RUN-ID via Server-Sent Events. Streams domain
-events, not raw model stdout."
-  (setf (hunchentoot:content-type*) "text/event-stream")
-  (setf (hunchentoot:header-out :cache-control) "no-cache")
-  (let ((stream (hunchentoot:send-headers))
-        (events (rc:replay-events (ar:ar-event-store *runtime*)
-                                  :entity-id run-id)))
-    (dolist (event events)
-      (format stream "event: ~a~%data: ~a~%~%"
+(defun sse-body (run-id)
+  "Render the DOMAIN event stream for RUN-ID as Server-Sent Events text.
+Streams domain events, never raw model stdout."
+  (with-output-to-string (out)
+    (dolist (event (rc:replay-events (ar:ar-event-store *runtime*)
+                                     :entity-id run-id))
+      (format out "event: ~a~%data: ~a~%~%"
               (string-downcase (symbol-name (rc:event-type event)))
               (jz:stringify (alexandria:plist-hash-table
                              (list "entity" (rc:event-entity-id event)
                                    "at" (rc:event-timestamp event))
                              :test #'equal))))
-    (format stream "event: end~%data: {\"run\":~s}~%~%" run-id)
-    (finish-output stream)
-    (values)))
+    (format out "event: end~%data: {\"run\":~s}~%~%" run-id)))
+
+(defun sse-events (run-id)
+  (setf (hunchentoot:content-type*) "text/event-stream")
+  (setf (hunchentoot:header-out :cache-control) "no-cache")
+  (sse-body run-id))
 
 ;;; ------------------------------------------------------------ server
 

@@ -21,7 +21,44 @@
    (validate :initarg :validate :initform t :reader tool-validate)
    (handler :initarg :handler :reader tool-handler :type function)))
 
-(defun make-tool (&key name description parameters effect (side-effect :none)
+(defun coerce-schema (schema)
+  "Coerce a JSON-schema given as an alist or hash table into an EQUAL
+hash-table form so validation lookups work uniformly."
+  (typecase schema
+    (hash-table
+     (let ((out (make-hash-table :test #'equal)))
+       (loop :for key :being :the :hash-keys :of schema
+               :using (hash-value value)
+             :do (setf (gethash key out) (coerce-schema value)))
+       out))
+    (list
+     ;; distinguish association entries (JSON objects) from arrays:
+     ;; a proper list whose first element is a cons is an object
+     (cond
+       ((and (consp (car schema)) (listp (rest schema)))
+        (let ((out (make-hash-table :test #'equal)))
+          (loop :for item :in schema
+                :do (typecase item
+                      (cons (let ((key (car item))
+                                  (value (cdr item)))
+                              (setf (gethash (if (symbolp key)
+                                                 (rlm.i:keyword->string key)
+                                                 key)
+                                             out)
+                                    (coerce-schema value))))
+                      (t item)))
+          out))
+       ((and (consp schema) (not (listp (rest schema))))
+        ;; a single key/value entry like ("type" . "object")
+        (let ((out (make-hash-table :test #'equal)))
+          (setf (gethash (car schema) out) (coerce-schema (cdr schema)))
+          out))
+       (t (mapcar #'coerce-schema schema))))
+    (string schema)
+    (vector (map 'list #'coerce-schema schema))
+    (t schema)))
+
+(defun make-tool (&key name description parameters (effect :read) (side-effect :none)
                     (time-limit 1.0d0) (max-output-bytes 4096)
                     (validate t) (result nil) handler)
   "Create a tool. PARAMETERS is a JSON-schema alist like
@@ -36,7 +73,7 @@ a JSON-serializable value."
   (make-instance 'rlm-tool
                  :name name
                  :description description
-                 :parameters parameters
+                 :parameters (coerce-schema parameters)
                  :result result
                  :effect effect
                  :side-effect side-effect
@@ -170,15 +207,14 @@ Returns (values result tool-call-record)."))
            (bytes (length (babel:string-to-octets json))))
       (when (> bytes (tool-max-output-bytes tool))
         (error 'tool-output-error :tool (tool-name tool) :bytes bytes))
-      (list :ok
-            value
-            (list :tool (tool-name tool)
-                  :effect (tool-effect tool)
-                  :side-effect (tool-side-effect tool)
-                  :started-at started
-                  :finished-at (rlm.i:now-iso8601)
-                  :output-bytes bytes
-                  :status :succeeded)))))
+      (values value
+              (list :tool (tool-name tool)
+                    :effect (tool-effect tool)
+                    :side-effect (tool-side-effect tool)
+                    :started-at started
+                    :finished-at (rlm.i:now-iso8601)
+                    :output-bytes bytes
+                    :status :succeeded)))))
 
 (defgeneric tool-wire-schema (tool)
   (:documentation "OpenAI-compatible function schema projected to the model."))

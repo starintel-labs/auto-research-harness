@@ -44,6 +44,7 @@
    #:tool-argument-error
    #:tool-output-error
    #:invoke-registry-tool
+   #:tool-wire-schema
    ;; context
    #:rlm-context
    #:context-text
@@ -77,6 +78,7 @@
    #:status
    #:default-registry
    #:default-transport
+   #:make-subprocess-transport
    ;; conditions
    #:rlm-error
    #:rlm-transport-error

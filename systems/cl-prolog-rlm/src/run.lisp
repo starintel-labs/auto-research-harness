@@ -151,6 +151,8 @@ supplied and one tool capability per registered tool."
           (setf record (list :call-id call-id :tool name :arguments arguments
                              :effect (tool-effect tool)
                              :side-effect (tool-side-effect tool)
+                             :started-at started
+                             :finished-at (rlm.i:now-iso8601)
                              :status :succeeded)))
       (error (condition)
         (setf reply (rlm.i:jmap
@@ -163,10 +165,10 @@ supplied and one tool capability per registered tool."
               record (list :call-id call-id :tool name :arguments arguments
                            :effect (when tool (tool-effect tool))
                            :side-effect (when tool (tool-side-effect tool))
+                           :started-at started
+                           :finished-at (rlm.i:now-iso8601)
                            :status :failed
                            :error (format nil "~a" condition)))))
-    (setf (cadr (member :started-at record)) started)
-    (setf (cadr (member :finished-at record)) (rlm.i:now-iso8601))
     (bt:with-lock-held ((run-lock run))
       (push record (run-tool-calls run)))
     (record-event run :tool-called (list :tool name :call-id call-id))
@@ -235,6 +237,9 @@ supplied and one tool capability per registered tool."
 
 (defun execute-run (run)
   "Synchronously execute RUN over its transport."
+  (when (eq (run-status run) :cancelled)
+    (setf (run-finished-at run) (rlm.i:now-iso8601))
+    (return-from execute-run run))
   (setf (run-status run) :running)
   (setf (run-started-at run) (rlm.i:now-iso8601))
   (record-event run :run-started nil)
@@ -262,7 +267,8 @@ supplied and one tool capability per registered tool."
                                     :message (format nil "~a" condition)))
         (record-event run :run-failed (run-error run)))))
   (when (run-handle run)
-    (transport-close (run-handle run) :force (eq (run-status run) :cancelled))
+    (ignore-errors
+     (transport-close (run-handle run) :force (eq (run-status run) :cancelled)))
     (setf (run-handle run) nil))
   (setf (run-finished-at run) (rlm.i:now-iso8601))
   (when (eq (run-status run) :running)
@@ -309,15 +315,28 @@ poll STATUS for progress or CANCEL to stop it."
     run))
 
 (defun cancel (run)
-  "Cancel RUN. A running run is terminated hard; its status becomes :cancelled."
+  "Cancel RUN. A running run is terminated hard; its status becomes
+:cancelled. The worker wakes by EOF from the terminated bridge."
   (case (run-status run)
     ((:pending :running)
      (setf (run-status run) :cancelled)
      (record-event run :run-cancelled nil)
+     ;; the worker may not have opened its bridge yet: wait briefly for the
+     ;; handle so the termination can unblock its read
+     (loop :repeat 200
+           :while (and (not (run-handle run))
+                       (run-thread run)
+                       (bt:thread-alive-p (run-thread run)))
+           :do (sleep 0.005))
      (when (run-handle run)
-       (transport-close (run-handle run) :force t))
+       ;; terminate the subprocess first: its EOF unblocks the worker read;
+       ;; closing the stream first would leave the blocked read stuck
+       (ignore-errors
+        (uiop:terminate-process (handle-process (run-handle run)) :urgent t))
+       (ignore-errors (transport-close (run-handle run) :force t))
+       (setf (run-handle run) nil))
      (when (run-thread run)
-       (bt:join-thread (run-thread run)))
+       (ignore-errors (bt:join-thread (run-thread run))))
      t)
     (t nil)))
 

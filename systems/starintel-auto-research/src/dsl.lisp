@@ -74,7 +74,7 @@
                                 :path ,path
                                 :artifact-store ,(or artifact-store :org-roam)
                                 :event-store ,(or event-store :jsonl)
-                                :forgejo ,forgejo)))
+                                :forgejo ',forgejo)))
      (unless ,path
        (error 'research-core:validation-error
               :message (format nil "research repository ~a requires a path"
@@ -84,36 +84,36 @@
 
 (defmacro define-project (id &key repository research-repository roam-project method
                                  budget rlm incoming)
-  `(progn
-     (unless ,repository
-       (error 'research-core:validation-error
-              :message (format nil "project ~a requires a repository"
-                               ,(string-downcase (symbol-name id)))))
-     (unless (and ,research-repository
-                  (gethash (string-downcase (symbol-name ,research-repository))
-                           *research-repositories*))
-       (error 'research-core:validation-error
-              :message (format nil "project ~a references unknown research repository ~a"
-                               ,(string-downcase (symbol-name id))
-                               ,research-repository)))
-     (unless (and ,budget (gethash (string-downcase (symbol-name ,budget))
-                                   *budget-profiles*))
-       (error 'research-core:validation-error
-              :message (format nil "project ~a references unknown budget ~a"
-                               ,(string-downcase (symbol-name id)) ,budget)))
-     (setf (gethash ,(string-downcase (symbol-name id)) *project-configs*)
-           (make-instance 'project-config
-                          :id ,(string-downcase (symbol-name id))
-                          :repository ,repository
-                          :research-repository
-                          (gethash (string-downcase (symbol-name ,research-repository))
-                                   *research-repositories*)
-                          :roam-project ,(or roam-project
-                                             (string-downcase (symbol-name id)))
-                          :method :aradr
-                          :budget ,(string-downcase (symbol-name budget))
-                          :rlm ,rlm
-                          :incoming ,incoming))))
+  "Define a project from TRUSTED init configuration. Reference names are
+symbols; forgejo/rlm/incoming are literal data and are never evaluated."
+  (let ((id-string (string-downcase (symbol-name id)))
+        (repo-name (and research-repository (string-downcase (symbol-name research-repository))))
+        (budget-name (and budget (string-downcase (symbol-name budget)))))
+    `(progn
+       (unless ,repository
+         (error 'research-core:validation-error
+                :message (format nil "project ~a requires a repository" ,id-string)))
+       (unless (and ,repo-name
+                    (gethash ,repo-name *research-repositories*))
+         (error 'research-core:validation-error
+                :message (format nil "project ~a references unknown research repository ~a"
+                                 ,id-string ,repo-name)))
+       (unless (and ,budget-name
+                    (gethash ,budget-name *budget-profiles*))
+         (error 'research-core:validation-error
+                :message (format nil "project ~a references unknown budget ~a"
+                                 ,id-string ,budget-name)))
+       (setf (gethash ,id-string *project-configs*)
+             (make-instance 'project-config
+                            :id ,id-string
+                            :repository ,repository
+                            :research-repository (gethash ,repo-name
+                                                          *research-repositories*)
+                            :roam-project ,(or roam-project id-string)
+                            :method ',(or method :aradr)
+                            :budget ,budget-name
+                            :rlm ',rlm
+                            :incoming ',incoming)))))
 
 (defun find-budget-profile (name)
   (gethash (string-downcase (string name)) *budget-profiles*))

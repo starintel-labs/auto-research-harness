@@ -15,11 +15,14 @@
 (defun short-id (prefix)
   (format nil "~a-~a" prefix
           (subseq (ironclad:byte-array-to-hex-string
-                   (ironclad:digest-sequence :sha256
-                                             (format nil "~a-~a-~a"
-                                                     prefix
-                                                     (get-universal-time)
-                                                     (random most-positive-fixnum))))
+                   (ironclad:digest-sequence
+                    :sha256
+                    (babel:string-to-octets
+                     (format nil "~a-~a-~a"
+                             prefix
+                             (get-universal-time)
+                             (random most-positive-fixnum))
+                     :encoding :utf-8)))
                   0 20)))
 
 (defun dict (&rest pairs)
@@ -74,7 +77,8 @@ for the front-matter keywords of TEXT. Parsing stops at the first heading."
   (let ((line (format nil "#+~a: ~a" (string-downcase key) value))
         (scanner (ppcre:create-scanner
                   (format nil "^[ \\t]*#\\+~a:[ \\t]*.*$"
-                          (ppcre:quote-meta-chars (string-downcase key))))))
+                          (ppcre:quote-meta-chars (string-downcase key)))
+                  :multi-line-mode t)))
     (multiple-value-bind (start end)
         (ppcre:scan scanner text)
       (if start
@@ -82,17 +86,25 @@ for the front-matter keywords of TEXT. Parsing stops at the first heading."
                        (subseq text 0 start)
                        line
                        (subseq text end))
-          (let ((lines (ppcre:split "(?=^)" text :multi-line-mode t)))
+          (with-input-from-string (in text)
             ;; insert after the last leading keyword/blank line
-            (let ((insert-at 0))
+            (let* ((lines (loop :for l := (read-line in nil nil)
+                                :while l
+                                :collect l))
+                   (insert-at 0))
               (loop :while (and (< insert-at (length lines))
                                 (or (ppcre:scan "^\\s*#\\+" (nth insert-at lines))
                                     (zerop (length (string-trim " " (nth insert-at lines))))))
                     :do (incf insert-at))
-              (let ((result (append (subseq lines 0 insert-at)
-                                    (list (concatenate 'string line (string #\newline)))
-                                    (subseq lines insert-at))))
-                (apply #'concatenate 'string result))))))))
+              (let* ((result (append (subseq lines 0 insert-at)
+                                     (list line)
+                                     (subseq lines insert-at)))
+                     (text2 (with-output-to-string (out)
+                              (dolist (l result)
+                                (write-line l out)))))
+                (if (char= (char text (1- (length text))) #\newline)
+                    text2
+                    (string-right-trim (string #\newline) text2)))))))))
 
 (defun org-section-bounds (text title)
   "Return (values start end) of the top-level section titled TITLE, or

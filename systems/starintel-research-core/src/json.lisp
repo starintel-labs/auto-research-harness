@@ -6,6 +6,7 @@
   (:local-nicknames (:jz :com.inuoe.jzon))
   (:export #:parse-value
            #:stringify-value
+           #:stringify-json
            #:to-table))
 
 (in-package #:research-core/json)
@@ -21,6 +22,22 @@ null -> :null."
     (string value)
     (vector (map 'list #'norm value))
     ((eql 'null) :null)
+    (t value)))
+
+(defun stringify-json (value)
+  "Serialize normalized CL data (hash tables, lists, scalars) as JSON."
+  (jz:stringify (jsonify value)))
+
+(defun jsonify (value)
+  (typecase value
+    (hash-table
+     (let ((out (make-hash-table :test #'equal)))
+       (loop :for key :being :the :hash-keys :of value
+               :using (hash-value v)
+             :do (setf (gethash key out) (jsonify v)))
+       out))
+    (cons (mapcar #'jsonify value))
+    (keyword (string-downcase (symbol-name value)))
     (t value)))
 
 (defun stringify-value (pairs)

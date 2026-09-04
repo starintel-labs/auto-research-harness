@@ -91,7 +91,7 @@ unique: identity is (instance, repository, number)."
 (defmethod issue-ref-idempotency-key ((ref issue-ref))
   "Stable idempotency key: forgejo:<instance>:<repository-id>:<issue-number>."
   (format nil "~a:~a:~a:~a"
-          (issue-ref-kind ref)
+          (string-downcase (symbol-name (issue-ref-kind ref)))
           (issue-ref-instance ref)
           (issue-ref-repository ref)
           (issue-ref-number ref)))

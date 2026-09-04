@@ -48,6 +48,8 @@
    #:make-candidate-ledger
    #:ledger-append
    #:ledger-replay
+   #:ledger-record
+   #:ledger-path
 
    ;; DSL
    #:define-research-repository
@@ -55,6 +57,7 @@
    #:define-project
    #:budget-profile
    #:research-repository-config
+   #:research-repository-forgejo
    #:project-config
    #:project-configs
    #:budget-profiles
@@ -64,23 +67,38 @@
    #:find-project-config
    #:clear-configs
    #:project-config-id
+   #:project-config-repository
    #:project-config-roam-slug
    #:project-config-rlm-mode
    #:project-config-method
    #:project-config-budget-name
    #:project-config-research-repository
+   #:project-config-incoming
 
    ;; runtime accessors
+   #:ar-root
    #:ar-runs-slot
    #:ar-requests-slot
    #:ar-candidates
    #:ar-event-store
    #:ar-store
+   #:ar-forgejo
+   #:ar-rlm-registry
+   #:ar-run-ledger
+   #:ar-candidate-ledger
+   #:ar-request-ledger
+   #:ar-operator
+   #:ar-provider
    #:ar-get-run
    #:ar-get-request
    #:ar-list-runs
+   #:ar-run-pending
+   #:ar-submit-candidate
+   #:ar-candidate-transition
+   #:ar-record-review
    #:ar-revision-counts
    #:ar-submit-research
+   #:ensure-path-in-store%/
    #:org-roam-root
    #:org-lexical-search
 

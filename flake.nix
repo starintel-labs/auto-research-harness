@@ -46,17 +46,13 @@
 
         sbcl = pkgs.sbcl.withPackages (ps: clDeps);
 
-        clSystems = [
+clSystems = [
           "cl-prolog-rlm"
           "starintel-aradr"
           "starintel-research-core"
           "starintel-auto-research"
           "starintel-auto-research-web"
         ];
-
-        loadSystems = builtins.concatStringsSep "\n" (
-          map (s: ''--eval "(asdf:load-system :${s})" \\'') clSystems
-        );
 
         autoResearch = pkgs.stdenvNoCC.mkDerivation {
           pname = "auto-research";
@@ -66,7 +62,7 @@
           strictDeps = true;
           nativeBuildInputs = [
             sbcl
-            pkgs.swipl
+            pkgs.swi-prolog
           ];
 
           dontConfigure = true;
@@ -76,11 +72,7 @@
             export HOME="$TMPDIR/home"
             mkdir -p "$HOME"
             export CL_SOURCE_REGISTRY="$PWD//"
-            sbcl --non-interactive \
-              --eval '(require :asdf)' \
-              ${loadSystems}
-              --eval '(format t "~&auto-research systems loaded~%")' \
-              --eval '(sb-ext:quit)'
+            sbcl --non-interactive --script "$PWD/scripts/load-all.lisp"
             runHook postBuild
           '';
 
@@ -142,7 +134,7 @@
           packages = [
             sbcl
             prologRlm
-            pkgs.swipl
+            pkgs.swi-prolog
             pkgs.git
             pkgs.python3
           ];

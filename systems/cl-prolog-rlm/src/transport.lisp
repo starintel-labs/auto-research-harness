@@ -39,7 +39,6 @@
 
 (defgeneric transport-close (handle &key force)
   (:documentation "Close the session; FORCE terminates hard (cancellation)."))
-
 (defgeneric transport-alive-p (handle)
   (:documentation "T when the underlying session is still alive."))
 
@@ -148,10 +147,14 @@ characters inside a frame survive."
 
 (defmethod transport-close ((handle subprocess-handle) &key force)
   (let ((process (handle-process handle)))
-    (multiple-value-bind (in out) (handle-streams handle)
+    ;; terminate before closing streams: process death delivers EOF on the
+    ;; still-open pipe so a blocked reader wakes; closing first would leave
+    ;; the blocked read stuck on a closed fd
+    (when force
+      (ignore-errors (uiop:terminate-process process :urgent t)))
+    (multiple-value-bind (in out stderr) (handle-streams handle)
+      (declare (ignore stderr))
       (ignore-errors (close in :abort force))
-      (ignore-errors (close out :abort t)))
-    (cond
-      (force (uiop:terminate-process process :force t))
-      (t (unless (uiop:process-alive-p process)
-           (uiop:terminate-process process :force t))))))
+      (ignore-errors (close out :abort force)))
+    (unless force
+      (ignore-errors (uiop:terminate-process process :urgent t)))))

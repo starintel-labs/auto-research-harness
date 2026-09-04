@@ -48,7 +48,9 @@ approved exceptional transitions."
       (exceptional-transition-allowed-p from to :reason :revision)))
 
 (defun candidate-transition-allowed-normal-p (from to)
-  (eq (cdr (assoc from +normal-candidate-transitions+)) to))
+  (member to (mapcar #'cdr
+                     (remove-if-not (lambda (pair) (eq (car pair) from))
+                                    +normal-candidate-transitions+))))
 
 (defun exceptional-transition-allowed-p (from to &key reason)
   "Exceptional transitions per the approved design:

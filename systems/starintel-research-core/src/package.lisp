@@ -65,8 +65,8 @@
    #:budget-max-depth
 
    #:principal
+   #:make-principal
    #:principal-id
-   #:principal-capabilities
    #:principal-allowed-p
 
    #:issue-ref

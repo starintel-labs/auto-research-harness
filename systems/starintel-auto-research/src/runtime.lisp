@@ -43,7 +43,7 @@ the bounded semantic tool set."
                    :provider provider
                    :run-ledger (make-run-ledger roam)
                    :candidate-ledger (make-candidate-ledger roam)
-                   :event-store (make-jsonl-event-store
+                   :event-store (research-core:make-jsonl-event-store
                                  (merge-pathnames ".ar-events.jsonl" root))
                    :operator operator)))
     ;; the request ledger records processed issue idempotency keys
@@ -180,7 +180,14 @@ research repo -> ARDR issue transaction -> run. Returns
          question)
         (ar-record-event runtime :forgejo.issue.created
                          (format nil "~a#~a" (forgejo-repository-of project) issue-number)
-                         :payload (sar.i:dict "created" (not created-p))))
+                         :payload (sar.i:dict "created" (not created-p)))
+        ;; claim the qualified identity so the webhook round-trip dedups
+        (record-request-key
+         runtime
+         (forgejo-issue-ref (forgejo-instance-of project)
+                            (forgejo-repository-of project)
+                            issue-number)
+         request-id))
       (setf (gethash request-id (ar-requests-slot runtime)) request)
       (setf (gethash run-id (ar-runs-slot runtime)) run)
       (values request run issue-number (not created-p)))))
@@ -227,14 +234,27 @@ absent. Returns (values result created-p)."
       (let ((existing (find-request-by-key runtime key)))
         (if existing
             (values (list :existing existing) nil)
-            (progn
-              (ar-submit-research runtime config
-                                  (or (extract-question body)
-                                      (and (stringp title) title)
-                                      "No question recorded.")
-                                  :source :forgejo
-                                  :issue-ref (research-core:make-issue-ref
-                                              :forgejo instance repository number))
+            (multiple-value-bind (request run issue-number existing-issue-p)
+                (ar-submit-research
+                 runtime config
+                 (or (extract-question body)
+                     (and (stringp title) title)
+                     "No question recorded.")
+                 :source :forgejo
+                 :issue-ref (research-core:make-issue-ref
+                             :forgejo instance repository number))
+              (declare (ignore run existing-issue-p))
+              ;; the transaction node uses the PAYLOAD identity: the issue
+              ;; already exists on the Forgejo side
+              (when (and instance repository number)
+                (write-ardr-issue-transaction
+                 (ar-store runtime) instance repository number
+                 (project-config-roam-slug config)
+                 (format nil "ARDR issue ~a#~a" repository number)
+                 (research-core:request-question request)))
+              ;; record the qualified identity so the API-created issue
+              ;; returning through the webhook resolves to this request
+              (record-request-key runtime key (research-core:request-id request))
               (values (list :created key) t)))))))
 
 (defun find-project-config-by-forgejo-repo (runtime repository)
@@ -325,8 +345,9 @@ semantic tool registry and the bounded context belong to CL; the model
 receives only the bounded task text, the opaque context, and the semantic
 tool set."
   (let* ((project (find-project-config
-                   (research-core:project-id (research-core:request-project request))))
+                   (project-config-id (research-core:request-project request))))
          (context (make-ar-context runtime request project)))
+    (declare (ignore run))
     (rlm:run :query (format nil
                             "RESEARCH STAGE for project ~a. Question: ~a. Use the semantic tools to search the corpus and record findings with sources; then submit-candidate with hypothesis, predicted result, and falsifier."
                             (project-config-id project)
@@ -364,7 +385,7 @@ auto-started and approval remains PENDING."
     (let* ((request (ar-get-request runtime
                                     (research-core:run-request-id run)))
            (project (find-project-config
-                     (research-core:project-id (research-core:request-project request)))))
+                     (project-config-id (research-core:request-project request)))))
       (when (and project (or (null project-id)
                              (string= project-id (project-config-id project))))
         (setf (research-core:run-status run) :running)
@@ -463,3 +484,31 @@ Partial canonical metadata is rejected by the validators."
         (cons "approval_base_blob" base-blob)
         (cons "approval_decided_at"
               (if (string= state "PENDING") "NONE" (sar.i:now-iso8601)))))
+
+(defmethod research-core:runtime-state ((runtime ar-runtime))
+  "Read-model projection for dashboards: configured projects plus live
+request/run state."
+  (let ((projects)
+        (runs)
+        (requests))
+    (loop :for id :being :the :hash-keys :of (project-configs)
+            :using (hash-value config)
+          :do (push (sar.i:dict "id" id
+                                "roam_subtree" (project-config-roam-slug config)
+                                "rlm_mode" (string-downcase
+                                            (symbol-name (project-config-rlm-mode config))))
+                    projects))
+    (loop :for run :being :the :hash-values :of (ar-runs-slot runtime)
+          :do (push (sar.i:dict "id" (research-core:run-id run)
+                                "status" (string-downcase
+                                          (symbol-name (research-core:run-status run))))
+                    runs))
+    (loop :for request :being :the :hash-values :of (ar-requests-slot runtime)
+          :do (push (sar.i:dict "id" (research-core:request-id request)
+                                "question" (research-core:request-question request)
+                                "status" (string-downcase
+                                          (symbol-name (research-core:request-status request))))
+                    requests))
+    (sar.i:dict "projects" (nreverse projects)
+                "runs" (nreverse runs)
+                "requests" (nreverse requests))))

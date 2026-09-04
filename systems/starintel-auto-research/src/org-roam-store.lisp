@@ -15,9 +15,10 @@
                 :reader org-roam-base-commit)))
 
 (defun make-org-roam-store (root &key (base-commit "uncommitted"))
-  (make-instance 'org-roam-store
-                 :root (namestring (truename root))
-                 :base-commit base-commit))
+  (let ((resolved (ensure-directories-exist root)))
+    (make-instance 'org-roam-store
+                   :root (namestring (truename resolved))
+                   :base-commit base-commit)))
 
 (defparameter +roam-trees+ '("design" "research" "implement" "indexes")
   "Canonical roam trees. The mirrored subtree name is project identity.")
@@ -70,13 +71,17 @@ visible directory structure across all trees (port of _roamlib)."
 (defun stable-file-id (relative-path)
   (format nil "starintel-~a"
           (subseq (ironclad:byte-array-to-hex-string
-                   (ironclad:digest-sequence :sha256 relative-path))
+                   (ironclad:digest-sequence
+                    :sha256 (babel:string-to-octets relative-path :encoding :utf-8)))
                   0 32)))
 
-(defun canonical-research-template (id title description filetags status)
+(defun canonical-research-template (id title description status filetags)
   "Canonical research node skeleton matching scripts/save-research.py output:
-stable :ID:, required keywords, objective and findings sections."
-  (format nil ":PROPERTIES:
+stable :ID:, required keywords, objective and findings sections, plus the
+canonical Approval Table (never fabricated: all rows PENDING/NOT STARTED)
+and Changelog required by scripts/validate-docs.py."
+  (let ((today (subseq (sar.i:now-iso8601) 0 10)))
+    (format nil ":PROPERTIES:
 :ID:       ~a
 :END:
 #+title: ~a
@@ -90,7 +95,28 @@ stable :ID:, required keywords, objective and findings sections."
 ~a
 
 * ~a Findings
-" id title description filetags status status description status))
+
+* Approval Table
+
+| Approval area | Required authority | State | Evidence required | Evidence reference |
+|---------------+--------------------+-------+-------------------+--------------------|
+| Research basis | Research reviewer | PENDING | Current primary-source verification | |
+| Architecture | Project maintainer | NOT APPLICABLE | Research note does not change architecture | Runtime research record |
+| Security | Security reviewer | NOT APPLICABLE | Read-only research note | Runtime research record |
+| Operations | Operator | NOT APPLICABLE | Runtime-managed research request | Runtime research record |
+| Implementation | Repository maintainer | NOT STARTED | Passing implementation, CI, and publication checks | |
+
+* Changelog
+
+| Date | Change | Author or actor | Evidence |
+|------+--------+-----------------+----------|
+| ~a | Research node created by the Auto Research runtime | auto-research-runtime | runtime research request |
+
+* Footnotes and Glossary
+
+- *Primary source*: Original authoritative material used as direct evidence.
+- *Inference*: A conclusion derived from evidence and identified separately from a verified fact.
+" id title description status filetags status description status today)))
 
 ;;; ------------------------------------------------- research write paths
 
@@ -109,10 +135,10 @@ writes Org directly."
            (tags (format nil ":starintel:research:~a:~a:" slug
                          (ecase state (:draft "draft") (:final ""))))
            (text (canonical-research-template id title description
+                                              status
                                               (if (string= tags ":starintel:research::")
                                                   ":starintel:research:"
-                                                  tags)
-                                              status)))
+                                                  tags))))
       (with-open-file (out path :direction :output :external-format :utf-8)
         (write-string text out))
       path)))
@@ -287,7 +313,7 @@ matched-term counts, title bonus (+12), description bonus (+6), capped at
                          (return-from process))
                        (let* ((keywords (parse-org-keywords text))
                               (filetags (gethash "filetags" keywords ""))
-                              (tags (remove-if #'zerop (mapcar #'string-trim (ppcre:split ":" filetags))))
+                              (tags (remove-if (lambda (c) (zerop (length (string-trim " " c)))) (ppcre:split ":" filetags)))
                               (title (or (gethash "title" keywords) (pathname-name path)))
                               (description (gethash "description" keywords ""))
                               (lower (string-downcase text))

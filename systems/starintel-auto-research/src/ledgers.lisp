@@ -91,7 +91,8 @@ abort the transition (the run loop reports the failure)."
           :unless (str:blankp line)
             :do (push (rc.j:to-table (rc.j:parse-value line)) events))))
     (setf events (nreverse events))
-    (let ((state (make-hash-table :test #'equal)))
+    (let ((seen (make-hash-table :test #'equal))
+          (state (make-hash-table :test #'equal)))
       (dolist (event events)
         (let* ((id (gethash "event_id" event))
                (entity (gethash "entity_id" event))
@@ -100,9 +101,11 @@ abort the transition (the run loop reports the failure)."
           (unless (and id entity)
             (error 'research-core:validation-error
                    :message (format nil "malformed ledger record: ~a" event)))
-          (unless (gethash id (ledger-seen ledger))
-            (setf (gethash id (ledger-seen ledger)) t)
-            (let ((current (gethash entity state)))
+          (unless (gethash id seen)
+            (setf (gethash id seen) t)
+            (let* ((current (gethash entity state))
+                   (previous (and previous (intern (string-upcase previous) :keyword)))
+                   (next (and next (intern (string-upcase next) :keyword))))
               (when (and current previous (not (equal current previous)))
                 (error 'research-core:transition-error
                        :message (format nil
