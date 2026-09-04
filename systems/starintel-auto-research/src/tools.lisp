@@ -53,6 +53,27 @@ pairs; REQUIRED is a list of property names."
                               field allowed)))
     value))
 
+(defun optional-string-arg (args field)
+  "Absent-tolerant string argument: JSON null or a missing field is nil;
+anything else must be a non-empty string."
+  (let ((value (gethash field args)))
+    (cond
+      ((null value) nil)
+      ((stringp value)
+       (if (plusp (length value)) value nil))
+      (t (error 'research-core:validation-error
+                :message (format nil "tool argument ~a must be a string" field))))))
+
+(defun ar-run-project-slug (runtime run-id)
+  "Resolve the roam project slug for RUN-ID through its request."
+  (let* ((run (ar-get-run runtime run-id))
+         (request (when run (ar-get-request runtime
+                                            (research-core:run-request-id run)))))
+    (when request
+      (project-config-roam-slug
+       (find-project-config
+        (project-config-id (research-core:request-project request)))))))
+
 (defun make-research-tool-registry ()
   "A fresh registry holding ONLY the semantic tool set."
   (rlm:make-registry))
@@ -68,8 +89,14 @@ pairs; REQUIRED is a list of property names."
     :effect effect
     :side-effect (if (eq effect :read) :none :data-write)
     :time-limit 2.0d0
-    :max-output-bytes 16384
-    :handler handler)))
+    :max-output-bytes 6144
+    :handler (lambda (args)
+               ;; A session dies when a tool handler raises, so validation
+               ;; errors are returned as model-readable values instead; the
+               ;; model can correct its arguments and retry.
+               (handler-case (funcall handler args)
+                 (research-core:validation-error (condition)
+                   (sar.i:dict "error" (format nil "~a" condition))))))))
 
 (defun install-research-tools (registry runtime)
   "Register the Auto Research semantic tools on REGISTRY, bound to
@@ -79,11 +106,11 @@ RUNTIME. Returns the registry."
    "Lexically search the canonical research corpus. Returns scored results with path, title, and description."
    (list "query" "string") (list "query")
    :read
-   (lambda (args)
-     (org-lexical-search (ar-store runtime)
-                         (require-string-field args "query")
-                         :project (gethash "project" args)
-                         :limit (or (gethash "limit" args) 12))))
+    (lambda (args)
+      (org-lexical-search (ar-store runtime)
+                          (require-string-field args "query")
+                          :project (gethash "project" args)
+                          :limit (or (gethash "limit" args) 5))))
   (register-semantic-tool
    registry runtime "read-research-node"
    "Read one research node by relative path. Returns parsed metadata, approval state, and lifecycle."
@@ -99,7 +126,7 @@ RUNTIME. Returns the registry."
                    "title" (gethash "title" keywords "")
                    "status" (gethash "status" keywords "")
                    "description" (gethash "description" keywords "")
-                   "excerpt" (excerpt text 4000)))))
+                   "excerpt" (excerpt text 1200)))))
   (register-semantic-tool
    registry runtime "read-design-node"
    "Read one design node by relative path. Returns parsed metadata and excerpt."
@@ -112,7 +139,7 @@ RUNTIME. Returns the registry."
        (let ((keywords (parse-org-keywords text)))
          (sar.i:dict "title" (gethash "title" keywords "")
                      "status" (gethash "status" keywords "")
-                     "excerpt" (excerpt text 4000))))))
+                     "excerpt" (excerpt text 1200))))))
   (register-semantic-tool
    registry runtime "repository-read"
    "Read one UTF-8 file beneath the configured research repository root. Rejects traversal."
@@ -193,9 +220,10 @@ RUNTIME. Returns the registry."
                  (list (gethash "commit" args))))))
   (register-semantic-tool
    registry runtime "submit-candidate"
-   "Submit a bounded research candidate with hypothesis, predicted result, and falsifier. Returns the candidate id."
+   "Submit a bounded research candidate with hypothesis, predicted result, and falsifier. Optional: one primary evidence citation, one acceptance criterion, and one rejected alternative. Returns the candidate id."
    (list "run_id" "string" "hypothesis" "string" "predicted_result" "string"
-         "falsifier" "string" "problem" "string")
+         "falsifier" "string" "problem" "string" "evidence" "string"
+         "acceptance_criteria" "string" "rejected_alternatives" "string")
    (list "run_id" "hypothesis" "predicted_result" "falsifier" "problem")
    :write
    (lambda (args)
@@ -206,8 +234,44 @@ RUNTIME. Returns the registry."
                 (require-string-field args "hypothesis")
                 (require-string-field args "predicted_result")
                 (require-string-field args "falsifier")
-                (gethash "parent_ids" args))))
+                (gethash "parent_ids" args)
+                :evidence (optional-string-arg args "evidence")
+                :acceptance-criteria (optional-string-arg args "acceptance_criteria")
+                :rejected-alternatives (optional-string-arg args "rejected_alternatives"))))
        (sar.i:dict "candidate_id" id))))
+  (register-semantic-tool
+   registry runtime "record-design-note"
+   "Record the bounded design note for this run as a canonical design node. CL serializes the design; the model supplies structured text only."
+   (list "run_id" "string" "design" "string") (list "run_id" "design")
+   :write
+   (lambda (args)
+     (let* ((run-id (require-string-field args "run_id"))
+            (slug (or (ar-run-project-slug runtime run-id)
+                      (error 'research-core:validation-error
+                             :message (format nil "unknown run: ~a" run-id))))
+            (path (write-design-node (ar-store runtime) slug run-id
+                                     (format nil "Design ~a" run-id)
+                                     (require-string-field args "design"))))
+       (sar.i:dict "path" (enough-namestring path (org-roam-root (ar-store runtime)))))))
+  (register-semantic-tool
+   registry runtime "record-design-review"
+   "Record one bounded design review with an explicit verdict on this run's design note."
+   (list "run_id" "string" "review" "string" "verdict" "string")
+   (list "run_id" "review" "verdict")
+   :write
+   (lambda (args)
+     (let* ((run-id (require-string-field args "run_id"))
+            (slug (or (ar-run-project-slug runtime run-id)
+                      (error 'research-core:validation-error
+                             :message (format nil "unknown run: ~a" run-id))))
+            (path (design-node-path (ar-store runtime) slug run-id)))
+       (unless (probe-file path)
+         (error 'research-core:validation-error
+                :message (format nil "no design note for run: ~a" run-id)))
+       (append-design-review path
+                             (require-string-field args "review")
+                             (require-string-field args "verdict"))
+       (sar.i:dict "path" (enough-namestring path (org-roam-root (ar-store runtime)))))))
   (register-semantic-tool
    registry runtime "record-review"
    "Record one independent review result for a candidate (scores and optional veto reason)."
@@ -220,7 +284,7 @@ RUNTIME. Returns the registry."
    (lambda (args)
      (let ((candidate-id (require-string-field args "candidate_id")))
        (ar-record-review runtime candidate-id args)
-       (sar.i:dict "recorded" candidate_id))))
+       (sar.i:dict "recorded" candidate-id))))
   registry)
 
 (defun ensure-path-in-store (runtime path)

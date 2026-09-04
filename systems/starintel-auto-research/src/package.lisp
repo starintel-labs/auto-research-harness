@@ -35,6 +35,10 @@
    #:mirror-roam-structure
    #:roam-project-dir
    #:write-research-node
+   #:write-design-node
+   #:design-node-path
+   #:append-design-review
+   #:design-reviewed-p
    #:append-research-update
    #:read-research-node
    #:write-ardr-issue-transaction
@@ -93,6 +97,9 @@
    #:ar-get-request
    #:ar-list-runs
    #:ar-run-pending
+   #:ar-run-candidates
+   #:*ar-stage-invoker*
+   #:ar-stage-error
    #:ar-submit-candidate
    #:ar-candidate-transition
    #:ar-record-review

@@ -274,9 +274,13 @@ absent. Returns (values result created-p)."
 ;;; ---------------------------------------------------- candidate handling
 
 (defun ar-submit-candidate (runtime run-id problem hypothesis predicted-result
-                            falsifier &optional parent-ids)
+                             falsifier &optional parent-ids
+                             &key evidence acceptance-criteria rejected-alternatives)
   "Create one bounded candidate per the approved contract and record the
-candidate.created event at :queued."
+candidate.created event at :queued. EVIDENCE is the primary citation for
+the central claim, ACCEPTANCE-CRITERIA the observable completion test, and
+REJECTED-ALTERNATIVES one considered-and-rejected alternative; all three
+are recorded as structured lists for the deterministic vetoes."
   (let ((candidate-id (sar.i:short-id "cand"))
         (parents (or parent-ids nil)))
     (unless (<= 0 (length parents) 2)
@@ -291,7 +295,11 @@ candidate.created event at :queued."
                 (cons :hypothesis hypothesis)
                 (cons :predicted-result predicted-result)
                 (cons :falsifier falsifier)
-                (cons :evidence-for nil)
+                (cons :evidence-for (when evidence (list evidence)))
+                (cons :acceptance-criteria
+                      (when acceptance-criteria (list acceptance-criteria)))
+                (cons :rejected-alternatives
+                      (when rejected-alternatives (list rejected-alternatives)))
                 (cons :evidence-against nil)
                 (cons :reviews nil)
                 (cons :created-at (sar.i:now-iso8601))))
@@ -339,84 +347,337 @@ before submitting; vetoes become explicit contrary evidence."
 
 ;;; ------------------------------------------------------------- RLM wiring
 
-(defun ar-rlm-run (runtime run request)
-  "Invoke Prolog-RLM :direct for RUN through the generic harness. The
-semantic tool registry and the bounded context belong to CL; the model
-receives only the bounded task text, the opaque context, and the semantic
-tool set."
-  (let* ((project (find-project-config
-                   (project-config-id (research-core:request-project request))))
-         (context (make-ar-context runtime request project)))
-    (declare (ignore run))
-    (rlm:run :query (format nil
-                            "RESEARCH STAGE for project ~a. Question: ~a. Use the semantic tools to search the corpus and record findings with sources; then submit-candidate with hypothesis, predicted result, and falsifier."
-                            (project-config-id project)
-                            (research-core:request-question request))
-             :registry (ar-rlm-registry runtime)
-             :context context
-             :provider (ar-provider runtime))))
+(defvar *ar-stage-invoker* nil
+  "Semantic stage invoker. NIL selects the default RLM harness
+invocation; tests may bind it to a scripted function of (runtime run
+request project stage) that performs the stage's semantic work through the
+semantic tools and returns :succeeded or signals.")
 
-(defun make-ar-context (runtime request project)
-  "Bounded context builder: never the whole corpus, never an ever-growing
-transcript. Question, project identity, and stage requirements only."
-  (declare (ignore runtime))
+(defun stage-name (stage)
+  (string-downcase (symbol-name stage)))
+
+(define-condition ar-stage-error (error)
+  ((stage :initarg :stage :reader ar-stage-error-stage)
+   (message :initarg :message :reader ar-stage-error-message))
+  (:report (lambda (c s)
+             (format s "ARADR stage ~a failed: ~a"
+                     (ar-stage-error-stage c)
+                     (ar-stage-error-message c)))))
+
+(defun ar-run-candidates (runtime run-id)
+  "All candidates belonging to RUN-ID, oldest first."
+  (loop :for id :being :the :hash-keys :of (ar-candidates runtime)
+          :using (hash-value candidate)
+        :when (string= (cdr (assoc :run-id candidate)) run-id)
+          :collect candidate))
+
+(defun stage-budget-of (project)
+  "Project budget -> one bounded RLM budget per stage invocation. The
+pack defaults (4 model calls, 4 tool calls) are sized for smoke tests, so
+real semantic stages get explicit headroom."
+  (let ((budget (find-budget-profile (project-config-budget-name project))))
+    (apply #'rlm:make-budget
+           (append '(:max-model-calls 32
+                      :max-tool-calls 32
+                      :max-context-ops 12
+                      :max-total-tokens 200000
+                      :max-cost-usd 1.0d0)
+                   (when budget
+                     (list :time-limit
+                           (min 600 (slot-value budget 'wall-clock-seconds))))))))
+
+(defun ar-stage-requirement (stage)
+  "The bounded stage requirement stated in the model context."
+  (ecase stage
+    (:request "deterministic artifact verification; no model calls")
+    (:research "search the corpus and record findings with sources; then submit exactly one candidate with hypothesis, predicted result, falsifier, one primary evidence citation, one acceptance criterion, and one rejected alternative")
+    (:adversarial-review "record exactly one independent adversarial review per candidate with numeric scores; veto only when the candidate must be rejected")
+    (:analysis "record counterevidence and unresolved questions for every material contrary point raised by the reviews")
+    (:design "record the bounded design note for this run covering invariants, actors, and rejected alternatives")
+    (:design-review "read the design note and record one design review with an explicit verdict")
+    (:promotion-gate "deterministic gate; no model calls")))
+
+(defun candidate-summary (candidate)
+  (format nil "candidate ~a: hypothesis: ~a; falsifier: ~a"
+          (cdr (assoc :id candidate))
+          (cdr (assoc :hypothesis candidate))
+          (cdr (assoc :falsifier candidate))))
+
+(defun ar-stage-context-data (runtime run stage)
+  "Stage-specific bounded data (candidate summaries) for the context."
+  (when (member stage '(:adversarial-review :analysis :design :design-review))
+    (let ((candidates (ar-run-candidates runtime (research-core:run-id run))))
+      (when candidates
+        (format nil "~{~a~^~%~}" (mapcar #'candidate-summary candidates))))))
+
+(defun make-ar-stage-context (runtime run request project stage)
+  "Bounded per-stage context builder: never the whole corpus, never an
+ever-growing transcript. Project identity, question, stage requirements,
+and stage data only."
   (rlm:make-context
-   (format nil "project: ~a~%roam subtree: ~a~%stage requirements: submit one candidate with hypothesis, predicted result, falsifier, and evidence~%question: ~a~%"
+   (format nil "project: ~a~%roam subtree: ~a~%question: ~a~%stage: ~a~%stage requirements: ~a~%~a"
            (project-config-id project)
            (project-config-roam-slug project)
-           (research-core:request-question request))
+           (research-core:request-question request)
+           (stage-name stage)
+           (ar-stage-requirement stage)
+           (or (ar-stage-context-data runtime run stage) ""))
    :max-bytes 8192))
 
-(defun budget-spec-of (project)
-  "Project budget -> RLM budget knobs."
-  (let ((budget (find-budget-profile (project-config-budget-name project))))
-    (when budget
-      (list :max-total-tokens 200000
-            :wall-clock (min 600 (slot-value budget 'wall-clock-seconds))))))
+(defun ar-context-directive ()
+  "Runtime guidance for the opaque text context: exactly one alias
+(input), search/slice only, it duplicates the task text, and the runtime's
+effect-isolation policy is stated up front."
+  (format nil "The opaque context alias is \"input\"; it contains only the stage metadata already stated in this task, so inspect it at most once with context_search. Never pass any other alias value. The runtime executes effectful (write) tool calls only when requested singly: request write tools one per turn, never combined with other tool calls in the same response."))
+
+(defun ar-stage-query (runtime run request project stage)
+  "The bounded task text for one stage. CL owns stage transitions: the
+query never lets the model choose them."
+  (declare (ignore runtime))
+  (ecase stage
+    (:request "REQUEST stage: deterministic artifact verification; no semantic work.")
+    (:research
+     (format nil "RESEARCH STAGE for project ~a, run ~a. Question: ~a. Search the corpus with search-research, record findings with record-finding, then call submit-candidate with run_id \"~a\", problem, hypothesis, predicted_result, falsifier, and the optional fields evidence, acceptance_criteria, rejected_alternatives. Do not finish with prose: your final action must be the submit-candidate tool call. ~a"
+             (project-config-id project)
+             (research-core:run-id run)
+             (research-core:request-question request)
+             (research-core:run-id run)
+             (ar-context-directive)))
+    (:adversarial-review
+     (format nil "ADVERSARIAL REVIEW stage for project ~a, run ~a. For each candidate listed in the context call record-review exactly once with reviewer \"adversarial-reviewer\", numeric scores for evidence, architecture, novelty, feasibility, testability, leverage, and scope, and a veto reason only when the candidate must be rejected. CL owns candidate state; never modify it. ~a"
+             (project-config-id project)
+             (research-core:run-id run)
+             (ar-context-directive)))
+    (:analysis
+     (format nil "ANALYSIS stage for project ~a, run ~a. For every material contrary point raised by the reviews, call record-counterevidence or record-unresolved-question on the research node. CL owns candidate state; never modify it. ~a"
+             (project-config-id project)
+             (research-core:run-id run)
+             (ar-context-directive)))
+    (:design
+     (format nil "DESIGN stage for project ~a, run ~a. Call record-design-note once with run_id ~a and a bounded design covering invariants, actors, and rejected alternatives. ~a"
+             (project-config-id project)
+             (research-core:run-id run)
+             (research-core:run-id run)
+             (ar-context-directive)))
+    (:design-review
+     (format nil "DESIGN REVIEW stage for run ~a. Read the design note, then call record-design-review once with run_id ~a, a bounded review, and an explicit verdict. ~a"
+             (research-core:run-id run)
+             (research-core:run-id run)
+             (ar-context-directive)))
+    (:promotion-gate "PROMOTION GATE stage: deterministic; no model calls.")))
+
+(defun ar-default-stage-invoker (runtime run request project stage)
+  "Default semantic stage invocation: one bounded direct-mode RLM run."
+  (ar-record-event runtime :rlm.started (research-core:run-id run)
+                   :payload (sar.i:dict "stage" (stage-name stage)))
+  (let ((rlm-result (rlm:run :query (ar-stage-query runtime run request project stage)
+                             :registry (ar-rlm-registry runtime)
+                             :context (make-ar-stage-context runtime run request project stage)
+                             :budget (stage-budget-of project)
+                             :provider (ar-provider runtime))))
+    (cond
+      ((eq (rlm:run-status rlm-result) :succeeded)
+       (ar-record-event runtime :rlm.completed (research-core:run-id run)
+                        :payload (sar.i:dict "stage" (stage-name stage)
+                                             "usage" (copy-usage (rlm:run-usage rlm-result))))
+       :succeeded)
+      (t
+       (ar-record-event runtime :rlm.failed (research-core:run-id run)
+                        :payload (sar.i:dict "stage" (stage-name stage)
+                                             "error" (format nil "~a" (rlm:run-error rlm-result))
+                                             "cause" (getf (rlm:run-error rlm-result) :cause)))
+       (error 'ar-stage-error :stage stage
+              :message (format nil "semantic backend failed: ~a"
+                               (rlm:run-error rlm-result)))))))
+
+(defun ar-invoke-semantic-stage (runtime run request project stage)
+  (unless (aradr:stage-requires-semantic-work-p stage)
+    (error 'ar-stage-error :stage stage :message "stage does not require semantic work"))
+  (funcall (or *ar-stage-invoker* #'ar-default-stage-invoker)
+           runtime run request project stage))
 
 ;;; -------------------------------------------------------- ARADR scheduling
 
+(defun ar-execute-stage (runtime run request project stage)
+  "Execute one stage: semantic work where the stage requires it, and the
+deterministic checks, completion requirements, and candidate lifecycle
+transitions owned by CL. Ordinary checks never spend LLM calls."
+  (ecase stage
+    (:request
+     ;; deterministic: an issue-backed request must have its durable ARDR
+     ;; transaction node before any semantic work starts
+     (let ((ref (research-core:request-issue-ref request)))
+       (when ref
+         (unless (find-ardr-issue-transaction
+                  (ar-store runtime)
+                  (research-core:issue-ref-instance ref)
+                  (research-core:issue-ref-repository ref)
+                  (research-core:issue-ref-number ref))
+           (error 'ar-stage-error :stage stage
+                  :message "issue-backed request lacks its ARDR transaction node")))))
+    (:research
+     (ar-invoke-semantic-stage runtime run request project stage)
+     (let ((candidates (ar-run-candidates runtime (research-core:run-id run))))
+       (unless candidates
+         (error 'ar-stage-error :stage stage
+                :message "research produced no candidate"))
+       (dolist (candidate candidates)
+         (when (eq (cdr (assoc :state candidate)) :queued)
+           (ar-candidate-transition runtime (cdr (assoc :id candidate)) :exploring)))))
+    (:adversarial-review
+     (let ((candidates (ar-run-candidates runtime (research-core:run-id run)))
+           (known-ids (loop :for id :being :the :hash-keys :of (ar-candidates runtime)
+                            :collect id)))
+       ;; deterministic checks first: no LLM calls spent on ordinary checks
+       (dolist (candidate candidates)
+         (aradr:check-required-fields
+          candidate '(:problem :hypothesis :predicted-result :falsifier))
+         (aradr:check-parent-ids candidate known-ids))
+       ;; proposal complete -> validation passed -> entering virtual review
+       (dolist (candidate candidates)
+         (let ((id (cdr (assoc :id candidate))))
+           (when (eq (cdr (assoc :state candidate)) :exploring)
+             (ar-candidate-transition runtime id :proposing))
+           (when (eq (cdr (assoc :state (gethash id (ar-candidates runtime))))
+                     :proposing)
+             (ar-candidate-transition runtime id :validating))))
+       (ar-invoke-semantic-stage runtime run request project stage)
+       (dolist (candidate (ar-run-candidates runtime (research-core:run-id run)))
+         (unless (cdr (assoc :reviews candidate))
+           (error 'ar-stage-error :stage stage
+                  :message (format nil "candidate ~a has no adversarial review"
+                                   (cdr (assoc :id candidate)))))
+         (when (eq (cdr (assoc :state candidate)) :validating)
+           (ar-candidate-transition runtime (cdr (assoc :id candidate))
+                                    :virtual-review)))))
+    (:analysis
+     (ar-invoke-semantic-stage runtime run request project stage)
+     (dolist (candidate (ar-run-candidates runtime (research-core:run-id run)))
+       (when (eq (cdr (assoc :state candidate)) :virtual-review)
+         (ar-candidate-transition runtime (cdr (assoc :id candidate)) :evaluated))))
+    (:design
+     (ar-invoke-semantic-stage runtime run request project stage)
+     (unless (probe-file (design-node-path (ar-store runtime)
+                                           (project-config-roam-slug project)
+                                           (research-core:run-id run)))
+       (error 'ar-stage-error :stage stage
+              :message "design stage produced no design node")))
+    (:design-review
+     (ar-invoke-semantic-stage runtime run request project stage)
+     (unless (design-reviewed-p
+              (design-node-path (ar-store runtime)
+                                (project-config-roam-slug project)
+                                (research-core:run-id run)))
+       (error 'ar-stage-error :stage stage
+              :message "design review not recorded")))))
+
+(defun ar-aggregate-review-score (reviews dimension)
+  "Mean of one numeric review dimension across all recorded reviews; nil
+when no review recorded a score for it."
+  (let ((values (loop :for review :in reviews
+                      :for value := (and (hash-table-p review)
+                                         (gethash dimension review))
+                      :when (numberp value) :collect value)))
+    (when values
+      (/ (reduce #'+ values) (length values)))))
+
+(defparameter +promotion-thresholds+ '(:evidence-min 4 :architecture-min 4)
+  "Deterministic promotion thresholds. A numeric score can never override
+a veto.")
+
+(defun ar-promotion-gate-stage (runtime run)
+  "The deterministic promotion gate: run vetoes and the gate for every
+evaluated candidate using the aggregated review scores. Denial is a
+recorded outcome, not a crash; the run completes without promoting when
+the gate denies. Promotion never activates an implementation slot and
+never implies implementation approval."
+  (let ((promoted) (denied))
+    (dolist (candidate (ar-run-candidates runtime (research-core:run-id run)))
+      (let* ((id (cdr (assoc :id candidate)))
+             (vetoes (aradr:run-vetoes candidate))
+             (reviews (cdr (assoc :reviews candidate)))
+             (evidence (ar-aggregate-review-score reviews "evidence"))
+             (architecture (ar-aggregate-review-score reviews "architecture")))
+        (cond
+          ((or (null evidence) (null architecture))
+           (push (sar.i:dict "candidate" id
+                             "reasons" (list "no recorded evidence/architecture review scores"))
+                 denied))
+          (t
+           (handler-case
+               (progn
+                 (aradr:promotion-gate candidate vetoes
+                                       (list (cons :evidence evidence)
+                                             (cons :architecture architecture))
+                                       +promotion-thresholds+)
+                 (ar-candidate-transition runtime id :promoted)
+                 (push id promoted))
+             (aradr:promotion-denied (condition)
+               (push (sar.i:dict "candidate" id
+                                 "reasons" (aradr:promotion-denied-reason-list condition))
+                     denied)))))))
+    (when promoted
+      (ar-record-event runtime :promotion.recorded (research-core:run-id run)
+                       :payload (sar.i:dict "candidates" (nreverse promoted))))
+    (when denied
+      (ar-record-event runtime :promotion.denied (research-core:run-id run)
+                       :payload (sar.i:dict "denials" (nreverse denied))))
+    (values (nreverse promoted) (nreverse denied))))
+
+(defun ar-run-stage-walk (runtime run request project)
+  "Walk RUN through the canonical ARADR stages in order: REQUEST ->
+RESEARCH -> ADVERSARIAL REVIEW -> ANALYSIS -> DESIGN -> DESIGN REVIEW ->
+PROMOTION GATE. Stage transitions are owned by CL; the model performs
+semantic work only when CL schedules a stage that requires it. Any stage
+failure blocks the run fail-closed at :unresolved."
+  (let ((stage :request)
+        (result nil))
+    (loop
+      (ar-record-event runtime :stage.started (research-core:run-id run)
+                       :payload (sar.i:dict "stage" (stage-name stage)))
+      (handler-case
+          (progn
+            (if (eq stage :promotion-gate)
+                (multiple-value-bind (promoted denied)
+                    (ar-promotion-gate-stage runtime run)
+                  (setf result (sar.i:dict "promoted" promoted "denied" denied)))
+                (ar-execute-stage runtime run request project stage))
+            (ar-record-event runtime :stage.completed (research-core:run-id run)
+                             :payload (sar.i:dict "stage" (stage-name stage)))
+            (when (eq stage :promotion-gate)
+              (setf (research-core:run-status run) :completed)
+              (ar-record-event runtime :run.completed (research-core:run-id run)
+                               :next-state :completed
+                               :payload (sar.i:dict "result" (or result "")))
+              (return t))
+            (setf stage (aradr:next-stage stage)))
+        (error (condition)
+          (ar-record-event runtime :stage.blocked (research-core:run-id run)
+                           :payload (sar.i:dict "stage" (stage-name stage)
+                                                "error" (princ-to-string condition)))
+          (setf (research-core:run-status run) :unresolved)
+          (ar-record-event runtime :run.completed (research-core:run-id run)
+                           :next-state :unresolved)
+          (return nil))))))
+
 (defun ar-run-pending (runtime &key project-id)
-  "Execute queued runs within budget: advance ARADR stages, schedule
-semantic work through the RLM harness, record stage and run events. A run
-may complete without promoting any candidate. Implementation is never
+  "Execute queued runs within budget by walking the canonical ARADR
+stages with per-stage RLM invocations for semantic work. A run may
+complete without promoting any candidate. Implementation is never
 auto-started and approval remains PENDING."
   (dolist (run (ar-list-runs runtime :queued))
     (let* ((request (ar-get-request runtime
                                     (research-core:run-request-id run)))
-           (project (find-project-config
-                     (project-config-id (research-core:request-project request)))))
+           (project (and request
+                         (find-project-config
+                          (project-config-id
+                           (research-core:request-project request))))))
       (when (and project (or (null project-id)
                              (string= project-id (project-config-id project))))
         (setf (research-core:run-status run) :running)
         (ar-record-event runtime :run.started (research-core:run-id run)
                          :previous-state :queued :next-state :running)
-        (ar-record-event runtime :stage.started (research-core:run-id run)
-                         :payload (sar.i:dict "stage" "research"))
-        (let ((rlm-result (ar-rlm-run runtime run request)))
-          (cond
-            ((eq (rlm:run-status rlm-result) :succeeded)
-             (ar-record-event runtime :rlm.started (research-core:run-id run))
-             (ar-record-event runtime :rlm.completed (research-core:run-id run)
-                              :payload (sar.i:dict
-                                        "usage" (rc.j:stringify-value
-                                                 (copy-usage (rlm:run-usage rlm-result)))))
-             (ar-record-event runtime :stage.completed (research-core:run-id run)
-                              :payload (sar.i:dict "stage" "research"))
-             (setf (research-core:run-status run) :completed)
-             (ar-record-event runtime :run.completed (research-core:run-id run)
-                              :next-state :completed
-                              :payload (sar.i:dict "result" (or (rlm:run-result rlm-result) ""))))
-            (t
-             ;; semantic backend failed structurally: the run records the
-             ;; failure and finishes without promotion (fail closed)
-             (ar-record-event runtime :rlm.failed (research-core:run-id run)
-                              :payload (sar.i:dict "error" (format nil "~a" (rlm:run-error rlm-result))))
-             (ar-record-event runtime :stage.blocked (research-core:run-id run)
-                              :payload (sar.i:dict "stage" "research"))
-             (setf (research-core:run-status run) :unresolved)
-             (ar-record-event runtime :run.completed (research-core:run-id run)
-                              :next-state :unresolved))))))))
+        (ar-run-stage-walk runtime run request project)))))
 
 (defun copy-usage (usage)
   (when (listp usage)
@@ -430,14 +691,16 @@ auto-started and approval remains PENDING."
 
 (defun promote-candidate (runtime candidate-id scores thresholds)
   "Run ARADR promotion guards for CANDIDATE and, on success, record the
-promotion. Denials raise aradr:promotion-denied with all reasons. Promotion
-never activates an implementation slot and never implies implementation
+promotion transition to :promoted. Denials raise aradr:promotion-denied
+with all reasons and leave the candidate untouched. Promotion never
+activates an implementation slot and never implies implementation
 approval."
   (let* ((candidate (or (gethash candidate-id (ar-candidates runtime))
                         (error 'research-core:validation-error
                                :message (format nil "unknown candidate: ~a" candidate-id))))
          (vetoes (aradr:run-vetoes candidate)))
-    (aradr:promotion-gate candidate vetoes scores thresholds)))
+    (aradr:promotion-gate candidate vetoes scores thresholds)
+    (ar-candidate-transition runtime candidate-id :promoted)))
 
 ;;; -------------------------------------------------------------- approval
 

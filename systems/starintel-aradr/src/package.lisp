@@ -40,4 +40,5 @@
    #:promotion-eligible-p
    #:promotion-gate
    #:promotion-denied
-   #:promotion-denied-reasons))
+   #:promotion-denied-reasons
+   #:promotion-denied-reason-list))

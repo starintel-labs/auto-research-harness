@@ -117,7 +117,9 @@ for the front-matter keywords of TEXT. Parsing stops at the first heading."
     (multiple-value-bind (start end)
         (ppcre:scan heading text)
       (when start
-        (let ((next (ppcre:scan "^\\*\\s+" text :start end)))
+        (let ((next (ppcre:scan (ppcre:create-scanner "^\\*\\s+"
+                                                      :multi-line-mode t)
+                                text :start end)))
           (values start (or next (length text))))))))
 
 (defun org-table-rows (section)

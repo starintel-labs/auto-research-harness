@@ -104,6 +104,7 @@
    #:event-actor
    #:event-config-hash
    #:event-payload-hash
+   #:event-payload
    #:event-evidence
 
    ;; artifact/issue/event/index adapters

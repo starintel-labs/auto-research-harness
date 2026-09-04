@@ -27,17 +27,20 @@ instructions; it is bounded by MAX-BYTES and larger inputs are truncated."
   ((max-iterations :initarg :max-iterations :initform nil)
    (max-model-calls :initarg :max-model-calls :initform nil)
    (max-tool-calls :initarg :max-tool-calls :initform nil)
+   (max-context-ops :initarg :max-context-ops :initform nil)
    (max-total-tokens :initarg :max-total-tokens :initform nil)
    (max-cost-usd :initarg :max-cost-usd :initform nil)
    (max-output-bytes :initarg :max-output-bytes :initform nil)
    (time-limit :initarg :time-limit :initform nil)))
 
 (defun make-budget (&key max-iterations max-model-calls max-tool-calls
+                      max-context-ops
                       max-total-tokens max-cost-usd max-output-bytes time-limit)
   (make-instance 'rlm-budget
                  :max-iterations max-iterations
                  :max-model-calls max-model-calls
                  :max-tool-calls max-tool-calls
+                 :max-context-ops max-context-ops
                  :max-total-tokens max-total-tokens
                  :max-cost-usd max-cost-usd
                  :max-output-bytes max-output-bytes
@@ -45,16 +48,18 @@ instructions; it is bounded by MAX-BYTES and larger inputs are truncated."
 
 (defun budget-spec (budget)
   (when (typep budget 'rlm-budget)
-    (rlm.i:jmap
-     (remove nil
-             (list
-              (aif (slot-value budget 'max-iterations) (cons "max_iterations" it))
-              (aif (slot-value budget 'max-model-calls) (cons "max_model_calls" it))
-              (aif (slot-value budget 'max-tool-calls) (cons "max_tool_calls" it))
-              (aif (slot-value budget 'max-total-tokens) (cons "max_total_tokens" it))
-              (aif (slot-value budget 'max-cost-usd) (cons "max_cost_usd" it))
-              (aif (slot-value budget 'max-output-bytes) (cons "max_output_bytes" it))
-              (aif (slot-value budget 'time-limit) (cons "time_limit" it)))))))
+    (labels ((field (slot name)
+               (let ((value (slot-value budget slot)))
+                 (when value (list (cons name value))))))
+      (rlm.i:jmap
+       (append (field 'max-iterations "max_iterations")
+               (field 'max-model-calls "max_model_calls")
+               (field 'max-tool-calls "max_tool_calls")
+               (field 'max-context-ops "max_context_ops")
+               (field 'max-total-tokens "max_total_tokens")
+               (field 'max-cost-usd "max_cost_usd")
+               (field 'max-output-bytes "max_output_bytes")
+               (field 'time-limit "time_limit"))))))
 
 (defclass rlm-provider ()
   ((endpoint :initarg :endpoint :initform nil :reader provider-endpoint)
@@ -69,15 +74,17 @@ instructions; it is bounded by MAX-BYTES and larger inputs are truncated."
 
 (defun provider-spec (provider)
   (when (typep provider 'rlm-provider)
-    (rlm.i:jmap
-     (remove nil
-             (list
-              (aif (provider-endpoint provider) (cons "endpoint" it))
-              (aif (provider-model provider) (cons "model" it))
-              (cond
-                ((provider-no-credential-p provider) (cons "no_credential" t))
-                ((provider-credential-env provider)
-                 (cons "credential_env" (provider-credential-env provider)))))))))
+    (labels ((field (value name)
+               (when value (list (cons name value)))))
+      (rlm.i:jmap
+       (append (field (provider-endpoint provider) "endpoint")
+               (field (provider-model provider) "model")
+               (cond
+                 ((provider-no-credential-p provider)
+                  (list (cons "no_credential" t)))
+                 ((provider-credential-env provider)
+                  (list (cons "credential_env" (provider-credential-env provider))))
+                 (t nil)))))))
 
 ;;; -------------------------------------------------------------------- run
 
@@ -121,12 +128,13 @@ instructions; it is bounded by MAX-BYTES and larger inputs are truncated."
                        :collect (tool-registry-spec tool))))))
 
 (defun capabilities-spec (run)
-  "Session capability list: opaque-context operations when a context is
-supplied and one tool capability per registered tool."
+  "Session capability list: plain-text context operations (search/slice;
+peek selectors are unsupported for text contexts) and one tool capability
+per registered tool."
   (let ((context (run-context run))
         (tools (registry-tools (run-registry run))))
     (append
-     (when context '("context(slice)" "context(peek)" "context(search)"))
+     (when context '("context(slice)" "context(search)"))
      (loop :for tool :in tools
            :collect (concatenate 'string "tool(" (tool-name tool) ")")))))
 
@@ -221,15 +229,15 @@ supplied and one tool capability per registered tool."
                              :tool-calls (rlm.i:jnum result "tool_calls")
                              :usage (parse-usage result)))))
       ((string= term "error")
-       (let ((error (first (rlm.i:jref payload "args"))))
-         (setf (run-error run)
-               (list :kind (rlm.i:jstr error "kind")
-                     :phase (rlm.i:jstr error "phase")
-                     :message (rlm.i:jstr error "message")
-                     :usage (parse-usage error))
-               (run-usage run) (parse-usage error)
-               (run-status run) :failed)
-         (record-event run :run-failed (run-error run))))
+        (let ((error (first (rlm.i:jref payload "args"))))
+          (setf (run-error run)
+                (list :kind (rlm.i:jstr error "kind")
+                      :phase (rlm.i:jstr error "phase")
+                      :message (rlm.i:jstr error "message")
+                      :cause (rlm.i:jref error "cause")
+                      :usage (parse-usage error))
+                (run-usage run) (parse-usage error))
+          (record-event run :run-failed (run-error run))))
       (t
        (setf (run-status run) :failed
              (run-error run) (list :kind "protocol" :message "malformed terminal envelope"))

@@ -78,6 +78,7 @@
    #:status
    #:default-registry
    #:default-transport
+   #:*default-transport*
    #:make-subprocess-transport
    ;; conditions
    #:rlm-error

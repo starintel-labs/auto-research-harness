@@ -34,9 +34,27 @@ bridge_main :-
                   [Msg0]),
            emit(json{op:"error", message:PreMsg0}),
            halt(3))),
+    ensure_effect_store,
     catch(request_loop,
           Error3,
           (emit_error(Error3), halt(2))).
+
+% Effectful tools require an open durable effect store. One bridge process
+% serves one run, so the default is a PID-unique journal file; hosts may
+% pin a durable store with RLM_EFFECT_STORE.
+ensure_effect_store :-
+    (   catch(getenv('RLM_EFFECT_STORE', File0), _, fail),
+        File0 \== ""
+    ->  atom_string(File, File0)
+    ;   current_prolog_flag(pid, Pid),
+        format(string(File), "/tmp/rlm-bridge-effects-~w.db", [Pid])
+    ),
+    catch(rlm_effect:rlm_effect_store_open(File),
+          E0,
+          (message_to_string(E0, Msg),
+           format(string(PreMsg), "effect store could not be opened: ~s", [Msg]),
+           emit(json{op:"error", message:PreMsg}),
+           halt(3))).
 
 request_loop :-
     catch(read_request(Request0),
@@ -120,10 +138,11 @@ budget_from_spec(Spec, Default, Budget) :-
     budget_override(Default, Spec, max_iterations, B1),
     budget_override(B1, Spec, max_model_calls, B2),
     budget_override(B2, Spec, max_tool_calls, B3),
-    budget_override(B3, Spec, max_total_tokens, B4),
-    budget_override(B4, Spec, max_cost_usd, B5),
-    budget_override(B5, Spec, max_output_bytes, B6),
-    budget_override(B6, Spec, time_limit, Budget).
+    budget_override(B3, Spec, max_context_ops, B4),
+    budget_override(B4, Spec, max_total_tokens, B5),
+    budget_override(B5, Spec, max_cost_usd, B6),
+    budget_override(B6, Spec, max_output_bytes, B7),
+    budget_override(B7, Spec, time_limit, Budget).
 
 budget_override(Budget0, Spec, Field, Budget1) :-
     (   get_dict(Field, Spec, Value),
@@ -155,7 +174,24 @@ provider_from_spec(Spec, Provider) :-
         Credential = env(EnvName)
     ;   Credential = env('OPENROUTER_API_KEY')
     ),
-    rlm_chain:openai_compatible_provider(Endpoint, Credential, Model, Provider).
+    provider_timeout(Timeout),
+    Provider = provider(openai_compatible,
+                        [ endpoint(Endpoint),
+                          credential(Credential),
+                          model(Model),
+                          timeout(Timeout)
+                        ]).
+
+% Large bounded contexts legitimately produce slow model turns; the pack's
+% 30s default times out long before the budget does. RLM_PROVIDER_TIMEOUT
+% (seconds) lets a host size this for its provider.
+provider_timeout(Timeout) :-
+    (   getenv('RLM_PROVIDER_TIMEOUT', Seconds),
+        atom_number(Seconds, Number),
+        Number >= 5.0
+    ->  Timeout = Number
+    ;   Timeout = 180.0
+    ).
 
 capabilities_option(Request, capabilities(Capabilities)) :-
     get_dict(capabilities, Request, Requested),
@@ -179,15 +215,23 @@ capability_term(Capability, Term) :-
     ;   atom_string(Term, Capability)
     ).
 
-inner_term("context", Inner, Context) :-
-    !,
-    atom_string(InnerAtom, Inner),
-    Context =.. [InnerAtom].
-inner_term("tool", Inner, tool(Tool)) :-
-    !,
-    atom_string(Tool, Inner).
-inner_term(_, Inner, Term) :-
-    atom_string(Term, Inner).
+% Kind and Inner may be atoms or strings depending on the caller; text
+% coming from JSON dicts and sub_atom/5 differ, so normalize explicitly.
+inner_term(Kind, Inner, Term) :-
+    to_atom(Kind, KindAtom),
+    to_atom(Inner, InnerAtom),
+    (   KindAtom == 'context'
+    ->  Term = context(InnerAtom)
+    ;   KindAtom == 'tool'
+    ->  Term = tool(InnerAtom)
+    ;   Term = InnerAtom
+    ).
+
+to_atom(Atom, Atom) :-
+    atom(Atom),
+    !.
+to_atom(Value, Atom) :-
+    atom_string(Atom, Value).
 
 % ------------------------------------------------------------------- tools
 
@@ -195,12 +239,19 @@ register_session_tools(Request, Registry) :-
     tool_registry_create(Registry),
     (   get_dict(tools, Request, Tools)
     ->  forall(member(Spec, Tools), register_bridge_tool(Registry, Spec))
-    ;   true ).
+    ;   true ),
+    % The CL host mediates every canonical write itself (argument
+    % validation, canonical serialization, ledger events), so the bridge
+    % host delegates the runtime authority decision for its own tools.
+    rlm_set_authority_if_unset(Registry, allow_session, _).
 
 register_bridge_tool(Registry, Spec) :-
     tool_spec_name(Spec, Name),
     get_dict(description, Spec, Description),
-    get_dict(arguments, Spec, Arguments),
+    get_dict(arguments, Spec, Arguments0),
+    % The runtime validates schema type/required values as atoms; the wire
+    % format carries JSON strings, so atomize the schema recursively.
+    wire_schema_atomized(Arguments0, Arguments),
     get_dict(effect, Spec, EffectString),
     atom_string(EffectAtom, EffectString),
     (   get_dict(time_limit, Spec, TimeLimit)
@@ -216,10 +267,37 @@ register_bridge_tool(Registry, Spec) :-
                          capability:tool(Name),
                          effect:EffectAtom,
                          arguments:Arguments,
-                         result:_{},
+                         result:_{type:any},
                          limits:_{time_limit:TimeLimit,
                                   max_output_bytes:MaxOutputBytes}},
-    tool_register(Registry, Schema, bridge_tool_handler(Name), _).
+    tool_register(Registry, Schema, bridge_tool_handler(Name), Outcome),
+    (   Outcome = ok(_)
+    ->  true
+    ;   format(string(Message), "tool ~w failed to register: ~q", [Name, Outcome]),
+        throw(bridge_fault(Message))
+    ).
+
+% A JSON schema dict may carry strings or atoms depending on the decoder;
+% normalize every string leaf to an atom so the runtime's atom comparisons
+% (type names, required fields) match.
+wire_schema_atomized(Value, Atomized) :-
+    is_dict(Value),
+    !,
+    dict_pairs(Value, Tag, Pairs0),
+    maplist(wire_pair_atomized, Pairs0, Pairs),
+    dict_create(Atomized, Tag, Pairs).
+wire_schema_atomized(Value, Atomized) :-
+    is_list(Value),
+    !,
+    maplist(wire_schema_atomized, Value, Atomized).
+wire_schema_atomized(Value, Atom) :-
+    string(Value),
+    !,
+    atom_string(Atom, Value).
+wire_schema_atomized(Value, Value).
+
+wire_pair_atomized(Key-Value0, Key-Value1) :-
+    wire_schema_atomized(Value0, Value1).
 
 tool_spec_name(Spec, Name) :-
     get_dict(name, Spec, Name0),
@@ -257,5 +335,5 @@ next_call_id(CallId) :-
     with_mutex(bridge_call_ids,
                (   retract(call_id_counter(N)),
                    N1 is N + 1,
-                   assertz(call_id_counter(N1))),
-               format(string(CallId), "call_~d", [N])).
+                   assertz(call_id_counter(N1)),
+                   format(string(CallId), "call_~d", [N]))).

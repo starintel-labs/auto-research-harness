@@ -23,8 +23,11 @@
     (:design-review . :promotion-gate))
   "The only legal forward transitions. Every other transition is invalid.")
 
-(defparameter +semantic-stages+ '(:research :adversarial-review :analysis)
-  "Stages during which the ARADR runtime schedules semantic work (RLM).")
+(defparameter +semantic-stages+ '(:research :adversarial-review :analysis
+                                   :design :design-review)
+  "Stages during which the ARADR runtime schedules semantic work (RLM).
+The request stage and the promotion gate are deterministic: ordinary code
+performs ordinary checks and no LLM calls are spent on them.")
 
 (defun stage-allowed-p (from to)
   "Is the transition FROM -> TO a legal ARADR stage transition?"

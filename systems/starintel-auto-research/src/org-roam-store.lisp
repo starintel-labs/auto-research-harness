@@ -186,6 +186,125 @@ Reviewed / Affected Design Files / Next Action)."
             (approval-state-of text)
             (lifecycle-status-of text))))
 
+;;; ------------------------------------------------------- design nodes
+
+(defun design-node-path (store slug run-id)
+  "The canonical design node path for RUN-ID of project SLUG. Pure path
+derivation so the design note and the design review resolve the same file."
+  (merge-pathnames (format nil "roam/design/~a/design-~a.org"
+                           (sar.i:slugify slug) (sar.i:slugify run-id))
+                   (org-roam-root store)))
+
+(defun canonical-design-template (id title description status filetags)
+  "Canonical design node skeleton: stable :ID:, required keywords, the
+canonical Approval Table (never fabricated: all rows PENDING/NOT STARTED
+or justified NOT APPLICABLE) and Changelog required by
+scripts/validate-docs.py, plus the design glossary."
+  (let ((today (subseq (sar.i:now-iso8601) 0 10)))
+    (format nil ":PROPERTIES:
+:ID:       ~a
+:END:
+#+title: ~a
+#+description: ~a
+#+status: ~a
+#+filetags: ~a
+#+todo: DRAFT REVIEW | DONE REJECTED
+
+* Objective
+
+~a
+
+* Approval Table
+
+| Approval area | Required authority | State | Evidence required | Evidence reference |
+|---------------+--------------------+-------+-------------------+--------------------|
+| Research basis | Research reviewer | NOT APPLICABLE | Design note follows the recorded research basis | Linked research node |
+| Architecture | Project maintainer | PENDING | Design review and resolved contradictions | |
+| Security | Security reviewer | PENDING | Authorization, disclosure, and secret-handling review | |
+| Operations | Operator | PENDING | Operational policy, budgets, monitoring, and rollback review | |
+| Implementation | Repository maintainer | NOT STARTED | Passing implementation, CI, and publication checks | |
+
+* Changelog
+
+| Date | Change | Author or actor | Evidence |
+|------+--------+-----------------+----------|
+| ~a | Design node created by the Auto Research runtime | auto-research-runtime | runtime design stage |
+
+* Footnotes and Glossary
+
+- *Invariant* — A condition the design must preserve across every valid execution path.
+- *Actor* — An independently stateful component that processes messages through a defined protocol.
+" id title description status filetags status today)))
+
+(defun write-design-node (store slug run-id title design-text)
+  "Create the canonical design node for RUN-ID of project SLUG with the
+bounded DESIGN-TEXT (model-supplied, CL-serialized) as the objective body.
+Idempotent: an existing node is returned unchanged. CL owns all Org
+formatting; the model never writes Org directly. Returns the absolute
+path."
+  (let ((path (design-node-path store slug run-id)))
+    (if (probe-file path)
+        path
+        (let* ((relative (enough-namestring path (org-roam-root store)))
+               (id (stable-file-id relative))
+               (safe-text (sanitize-model-text design-text))
+               (status "DRAFT")
+               (tags (format nil ":starintel:design:~a:draft:" (sar.i:slugify slug)))
+               (text (canonical-design-template
+                      id title
+                      (format nil "Design note for run ~a of project ~a."
+                              (sar.i:slugify run-id) (sar.i:slugify slug))
+                      status tags))
+               (text (org-replace-section text "Objective"
+                                          (format nil "* Objective~%~%~a~%" safe-text))))
+          (ensure-directories-exist path)
+          (with-open-file (out path :direction :output :external-format :utf-8)
+            (write-string text out))
+          path))))
+
+(defun org-replace-section (text title replacement)
+  "Replace the level-1 section TITLE in TEXT with REPLACEMENT (which
+includes its own heading). Other sections are preserved."
+  (multiple-value-bind (start end)
+      (org-section-bounds text title)
+    (if start
+        (concatenate 'string (subseq text 0 start)
+                     replacement
+                     (subseq text end))
+        text)))
+
+(defun sanitize-model-text (text)
+  "Model text is a bounded value, never Org structure: demote any
+heading-like line so model output can never forge canonical sections."
+  (with-output-to-string (out)
+    (with-input-from-string (in (or text ""))
+      (loop :for line := (read-line in nil nil)
+            :while line
+            :do (write-line
+                 (if (ppcre:scan "^\\*+\\s" line)
+                     (ppcre:regex-replace "^\\*+\\s+" line "- ")
+                     line)
+                 out)))))
+
+(defun append-design-review (path review verdict)
+  "Append one bounded design review block to the design node at PATH.
+The verdict is explicit text recorded by the design review stage."
+  (let* ((timestamp (local-time:format-rfc3339-timestring nil (local-time:now)))
+         (block (format nil "
+** DONE Design review ~a
+- Verdict: ~a
+- ~a
+" timestamp (sanitize-model-text verdict) (sanitize-model-text review))))
+    (with-open-file (out path :direction :output :if-exists :append
+                                 :external-format :utf-8)
+      (write-string block out))
+    path))
+
+(defun design-reviewed-p (path)
+  "T when the design node at PATH records at least one design review."
+  (and (probe-file path)
+       (search "Design review" (uiop:read-file-string path))))
+
 ;;; ------------------------------------------------ ARDR issue transactions
 
 (defun write-ardr-issue-transaction (store instance repository number slug

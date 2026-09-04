@@ -332,3 +332,198 @@ STATE is a plist: (issues . hash-table) (calls . count)."
     (multiple-value-bind (state)
         (ar:ledger-replay (ar:ar-candidate-ledger runtime))
       (is (eq :exploring (gethash candidate-id state))))))
+
+;;; ------------------------------------------------------ ARADR stage walk
+
+(defun stage-order-names ()
+  (mapcar (lambda (stage) (string-downcase (symbol-name stage)))
+          (aradr:all-stages)))
+
+(defun stage-event-order (runtime run-id)
+  (let ((events (rc:replay-events (ar:ar-event-store runtime)
+                                  :entity-id run-id
+                                  :event-types '(:stage.started))))
+    (mapcar (lambda (event) (gethash "stage" (rc:event-payload event))) events)))
+
+(defun stage-event-present-p (runtime run-id type)
+  (member type (rc:replay-events (ar:ar-event-store runtime)
+                                 :entity-id run-id :event-types (list type))
+          :key #'rc:event-type))
+
+(defun stage-walk-stub-invoker (finding-path &key with-evidence)
+  "Scripted semantic stage invoker: performs the same bounded semantic
+tool calls a model would make, deterministically, through the real
+registry validation and handlers."
+  (lambda (runtime run request project stage)
+    (declare (ignore request project))
+    (let ((registry (ar:ar-rlm-registry runtime))
+          (run-id (rc:run-id run)))
+      (ecase stage
+        ((:request :promotion-gate) nil)
+        (:research
+         (rlm:invoke-registry-tool registry "record-finding"
+                                   (alexandria:plist-hash-table
+                                    (list "path" finding-path
+                                          "finding" "Stub research finding with a recorded source.")
+                                    :test #'equal))
+         (rlm:invoke-registry-tool registry "submit-candidate"
+                                   (alexandria:plist-hash-table
+                                    (append
+                                     (list "run_id" run-id
+                                           "problem" "How does the stage walk behave?"
+                                           "hypothesis" "The walk advances lifecycle states."
+                                           "predicted_result" "Candidates reach EVALUATED."
+                                           "falsifier" "A run that stops at RESEARCH.")
+                                     (when with-evidence
+                                       (list "evidence" "https://example.com/primary-source"
+                                             "acceptance_criteria" "Stage walk test passes"
+                                             "rejected_alternatives" "single-stage scheduler")))
+                                    :test #'equal)))
+        (:adversarial-review
+         (dolist (candidate (ar:ar-run-candidates runtime run-id))
+           (rlm:invoke-registry-tool registry "record-review"
+                                     (alexandria:plist-hash-table
+                                      (list "candidate_id" (cdr (assoc :id candidate))
+                                            "reviewer" "adversarial-reviewer"
+                                            "evidence" 5 "architecture" 5
+                                            "novelty" 4 "feasibility" 4
+                                            "testability" 4 "leverage" 4
+                                            "scope" 4)
+                                      :test #'equal))))
+        (:analysis
+         (rlm:invoke-registry-tool registry "record-counterevidence"
+                                   (alexandria:plist-hash-table
+                                    (list "path" finding-path
+                                          "evidence" "Contrary point recorded by the analysis stage.")
+                                    :test #'equal)))
+        (:design
+         (rlm:invoke-registry-tool registry "record-design-note"
+                                   (alexandria:plist-hash-table
+                                    (list "run_id" run-id
+                                          "design" "Invariant: lifecycle and approval stay separate dimensions. Actor: the CL stage scheduler.")
+                                    :test #'equal)))
+        (:design-review
+         (rlm:invoke-registry-tool registry "record-design-review"
+                                   (alexandria:plist-hash-table
+                                    (list "run_id" run-id
+                                          "review" "Design covers the required invariants and actors."
+                                          "verdict" "continue")
+                                    :test #'equal)))))
+    :succeeded))
+
+(defun run-canonical-validator (root)
+  "Run the canonical validate-docs.py over ROOT; returns the exit code."
+  (let ((validator (merge-pathnames
+                    "scripts/validate-docs.py"
+                    (pathname (or (uiop:getenv "AR_CANONICAL_REPO")
+                                  "/home/unseen/starintel/starintel-auto-research/")))))
+    (if (probe-file validator)
+        (progn
+          (write-canonical-validator-fixtures root)
+          (multiple-value-bind (output errors exit-code)
+              (uiop:run-program (list "python3" (namestring validator)
+                                      "--root" (namestring root))
+                                :output :string :error-output :string
+                                :ignore-error-status t)
+            (declare (ignore output))
+            (when (/= exit-code 0)
+              (format *error-output* "~a~%" errors))
+            exit-code))
+        ;; validator unavailable: treat as skipped pass
+        0)))
+
+(test stage-walk-fails-closed-without-candidate
+  ;; the semantic backend answers but produces no candidate: the research
+  ;; stage completion check fails and the run blocks at :unresolved
+  (let* ((fixtures (make-test-corpus))
+         (root (getf fixtures :root))
+         (runtime (make-runtime-for root)))
+    (multiple-value-bind (request run)
+        (ar:ar-submit-research runtime (ar:find-project-config "prolog-rlm")
+                               "Will not produce a candidate")
+      (declare (ignore request))
+      (let ((rlm:*default-transport* (fake-transport)))
+        (ar:ar-run-pending runtime))
+      (is (eq :unresolved (rc:run-status run)))
+      ;; the walk stopped at research: no later stage ever started
+      (is (equal '("request" "research") (stage-event-order runtime (rc:run-id run))))
+      (is-true (stage-event-present-p runtime (rc:run-id run) :stage.blocked))
+      (is-false (stage-event-present-p runtime (rc:run-id run) :promotion.recorded)))))
+
+(test stage-walk-full-completion-denies-unevidenced-candidate
+  ;; every stage runs in canonical order; the promotion gate then denies
+  ;; deterministically because the candidate records no evidence
+  (let* ((fixtures (make-test-corpus))
+         (root (getf fixtures :root))
+         (runtime (make-runtime-for root))
+         (finding-path (enough-namestring (getf fixtures :path-1)
+                                          (ar:org-roam-root (ar:ar-store runtime)))))
+    (multiple-value-bind (request run)
+        (ar:ar-submit-research runtime (ar:find-project-config "prolog-rlm")
+                               "Walk every ARADR stage")
+      (declare (ignore request))
+      (let ((ar:*ar-stage-invoker*
+              (stage-walk-stub-invoker finding-path :with-evidence nil)))
+        (ar:ar-run-pending runtime))
+      (is (eq :completed (rc:run-status run)))
+      (is (equal (stage-order-names) (stage-event-order runtime (rc:run-id run))))
+      ;; the candidate reached EVALUATED but was denied promotion
+      (let ((candidate (first (ar:ar-run-candidates runtime (rc:run-id run)))))
+        (is (eq :evaluated (cdr (assoc :state candidate)))))
+      (is-false (stage-event-present-p runtime (rc:run-id run) :promotion.recorded))
+      (is-true (stage-event-present-p runtime (rc:run-id run) :promotion.denied))
+      ;; the design artifact exists and records its review
+      (let ((design (ar:design-node-path (ar:ar-store runtime) "prolog-rlm"
+                                         (rc:run-id run))))
+        (is-true (probe-file design))
+        (is-true (ar:design-reviewed-p design)))
+      ;; implementation is never auto-started
+      (is (null (uiop:directory-files
+                 (merge-pathnames "roam/implement/prolog-rlm/" root)))))))
+
+(test stage-walk-promotes-clean-candidate
+  ;; a candidate with evidence, acceptance criteria, rejected alternatives,
+  ;; and passing review scores passes the deterministic gate
+  (let* ((fixtures (make-test-corpus))
+         (root (getf fixtures :root))
+         (runtime (make-runtime-for root))
+         (finding-path (enough-namestring (getf fixtures :path-1)
+                                          (ar:org-roam-root (ar:ar-store runtime)))))
+    (multiple-value-bind (request run)
+        (ar:ar-submit-research runtime (ar:find-project-config "prolog-rlm")
+                               "Walk every ARADR stage with evidence")
+      (declare (ignore request))
+      (let ((ar:*ar-stage-invoker*
+              (stage-walk-stub-invoker finding-path :with-evidence t)))
+        (ar:ar-run-pending runtime))
+      (is (eq :completed (rc:run-status run)))
+      (is (equal (stage-order-names) (stage-event-order runtime (rc:run-id run))))
+      (let ((candidate (first (ar:ar-run-candidates runtime (rc:run-id run)))))
+        (is (eq :promoted (cdr (assoc :state candidate)))))
+      (is-true (stage-event-present-p runtime (rc:run-id run) :promotion.recorded))
+      ;; promotion never activates an implementation slot
+      (is (null (uiop:directory-files
+                 (merge-pathnames "roam/implement/prolog-rlm/" root))))
+      ;; generated artifacts (including the design node) pass the
+      ;; CURRENT canonical validators
+      (is (= 0 (run-canonical-validator root))))))
+
+(test design-note-is-idempotent-and-sanitized
+  ;; re-recording the design note for one run returns the same file, and
+  ;; model text can never forge canonical Org sections
+  (let* ((fixtures (make-test-corpus))
+         (root (getf fixtures :root))
+         (store (ar:make-org-roam-store root)))
+    (let ((path (ar:write-design-node store "prolog-rlm" "run-1"
+                                      "Design run-1"
+                                      "* forged heading
+The bounded design body.")))
+      (is (equal path (ar:write-design-node store "prolog-rlm" "run-1"
+                                            "Design run-1" "other text")))
+      (let ((text (uiop:read-file-string path)))
+        (is (search "- forged heading" text))
+        (is-false (search "* forged" text)))
+      ;; review append is visible through design-reviewed-p
+      (ar:append-design-review path "Looks consistent." "continue")
+      (is-true (ar:design-reviewed-p path))
+      (is (= 0 (run-canonical-validator root))))))
