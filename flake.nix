@@ -5,7 +5,7 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     prolog-rlm = {
-      url = "github:lost-rob0t/prolog-rlm";
+      url = "git+https://git.starintel.actor/nsaspy/prolog-rlm.git";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };

@@ -60,17 +60,17 @@
         ]
       },
       "locked": {
-        "lastModified": 1788377211,
-        "narHash": "sha256-lhZYuNlulh4+VeNCsfe17wR5CS/1+bY8DNupcVH6LYA=",
-        "owner": "lost-rob0t",
-        "repo": "prolog-rlm",
-        "rev": "156bfe9b2caffa1b967e77bee51263ee9e85fb50",
-        "type": "github"
+        "lastModified": 1788551062,
+        "narHash": "sha256-NmTbI13vZUVlHuBH5Y7nGNXSUhrqoXiZkVnSxiPK8mQ=",
+        "ref": "refs/heads/main",
+        "rev": "6092c2a9ba2359d83356a9c2d8c1dfc75e0e5506",
+        "revCount": 757,
+        "type": "git",
+        "url": "https://git.starintel.actor/nsaspy/prolog-rlm.git"
       },
       "original": {
-        "owner": "lost-rob0t",
-        "repo": "prolog-rlm",
-        "type": "github"
+        "type": "git",
+        "url": "https://git.starintel.actor/nsaspy/prolog-rlm.git"
       }
     },
     "root": {
