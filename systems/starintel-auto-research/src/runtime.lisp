@@ -467,28 +467,43 @@ query never lets the model choose them."
     (:promotion-gate "PROMOTION GATE stage: deterministic; no model calls.")))
 
 (defun ar-default-stage-invoker (runtime run request project stage)
-  "Default semantic stage invocation: one bounded direct-mode RLM run."
-  (ar-record-event runtime :rlm.started (research-core:run-id run)
-                   :payload (sar.i:dict "stage" (stage-name stage)))
-  (let ((rlm-result (rlm:run :query (ar-stage-query runtime run request project stage)
-                             :registry (ar-rlm-registry runtime)
-                             :context (make-ar-stage-context runtime run request project stage)
-                             :budget (stage-budget-of project)
-                             :provider (ar-provider runtime))))
-    (cond
-      ((eq (rlm:run-status rlm-result) :succeeded)
-       (ar-record-event runtime :rlm.completed (research-core:run-id run)
-                        :payload (sar.i:dict "stage" (stage-name stage)
-                                             "usage" (copy-usage (rlm:run-usage rlm-result))))
-       :succeeded)
-      (t
-       (ar-record-event runtime :rlm.failed (research-core:run-id run)
-                        :payload (sar.i:dict "stage" (stage-name stage)
-                                             "error" (format nil "~a" (rlm:run-error rlm-result))
-                                             "cause" (getf (rlm:run-error rlm-result) :cause)))
-       (error 'ar-stage-error :stage stage
-              :message (format nil "semantic backend failed: ~a"
-                               (rlm:run-error rlm-result)))))))
+  "Default semantic stage invocation: one bounded direct-mode RLM run.
+Transport/boot failures are retried once — they cost no tokens; semantic
+failures are terminal."
+  (let ((attempt 0))
+    (loop
+      (incf attempt)
+      (handler-case
+          (progn
+            (ar-record-event runtime :rlm.started (research-core:run-id run)
+                             :payload (sar.i:dict "stage" (stage-name stage)))
+            (let ((rlm-result (rlm:run :query (ar-stage-query runtime run request project stage)
+                                       :registry (ar-rlm-registry runtime)
+                                       :context (make-ar-stage-context runtime run request project stage)
+                                       :budget (stage-budget-of project)
+                                       :provider (ar-provider runtime))))
+              (cond
+                ((eq (rlm:run-status rlm-result) :succeeded)
+                 (ar-record-event runtime :rlm.completed (research-core:run-id run)
+                                  :payload (sar.i:dict "stage" (stage-name stage)
+                                                       "usage" (copy-usage (rlm:run-usage rlm-result))))
+                 (return-from ar-default-stage-invoker :succeeded))
+                (t
+                 (ar-record-event runtime :rlm.failed (research-core:run-id run)
+                                  :payload (sar.i:dict "stage" (stage-name stage)
+                                                       "error" (format nil "~a" (rlm:run-error rlm-result))
+                                                       "cause" (getf (rlm:run-error rlm-result) :cause)))
+                 (error 'ar-stage-error :stage stage
+                        :message (format nil "semantic backend failed: ~a"
+                                         (rlm:run-error rlm-result)))))))
+        (rlm:rlm-transport-error (condition)
+          (when (>= attempt 2)
+            (error 'ar-stage-error :stage stage
+                   :message (format nil "semantic transport failed after retry: ~a" condition)))
+          (ar-record-event runtime :rlm.started (research-core:run-id run)
+                           :payload (sar.i:dict "stage" (stage-name stage)
+                                                "retry" attempt))
+          (sleep 1))))))
 
 (defun ar-invoke-semantic-stage (runtime run request project stage)
   (unless (aradr:stage-requires-semantic-work-p stage)

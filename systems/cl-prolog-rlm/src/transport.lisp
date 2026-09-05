@@ -83,13 +83,22 @@
 (defmethod transport-open ((transport subprocess-transport))
   (let* ((swipl (or (subprocess-swipl transport) (find-swipl)))
          (bridge (or (subprocess-bridge transport) (find-bridge-script)))
+         (stderr-path (bridge-stderr-path))
          (process (uiop:launch-program
                    (list swipl "-q" "-s" bridge)
                    :input :stream
                    :output :stream
-                   :error-output :stream
+                   :error-output (open (ensure-directories-exist stderr-path)
+                                       :direction :output
+                                       :if-exists :append
+                                       :if-does-not-exist :create)
                    :element-type '(unsigned-byte 8))))
     (make-instance 'subprocess-handle :process process)))
+
+(defun bridge-stderr-path ()
+  (merge-pathnames (make-pathname :name (format nil "rlm-bridge-stderr-~a" (rlm.i:make-uuid))
+                                  :type "log")
+                   (uiop:temporary-directory)))
 
 (defclass subprocess-handle ()
   ((process :initarg :process :reader handle-process)

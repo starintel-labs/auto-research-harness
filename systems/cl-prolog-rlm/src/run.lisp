@@ -258,7 +258,12 @@ per registered tool."
         (let ((pong (transport-read (run-handle run))))
           (unless (and (hash-table-p pong)
                        (string= (rlm.i:jstr pong "op") "pong"))
-            (error 'rlm-protocol-error :message "bridge did not answer ping")))
+            (error 'rlm-protocol-error
+                   :message (if (and (hash-table-p pong)
+                                     (string= (rlm.i:jstr pong "op") "error"))
+                                (format nil "bridge failed to boot: ~a"
+                                        (rlm.i:jstr pong "message"))
+                                "bridge did not answer ping"))))
         (transport-send (run-handle run) (run-request run))
         (let ((envelope (read-terminal (run-handle run) run)))
           (apply-outcome run envelope)))
