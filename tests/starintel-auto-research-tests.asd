@@ -22,4 +22,5 @@
      (:file "org-tests")
      (:file "aradr-tests")
      (:file "runtime-tests")
+     (:file "grounding-tests")
      (:file "web-tests")))))

@@ -131,16 +131,23 @@ separator rows. Returns (values header rows)."
         :for line := (read-line in nil nil)
         :while line
         :when (ppcre:scan "^\\s*\\|.*\\|\\s*$" line)
-          :do (let* ((inner (subseq line
-                                    (1+ (position #\| line))
-                                    (position #\| line :from-end t)))
-                     (cells (mapcar (lambda (c) (string-trim " " c))
-                                    (ppcre:split "\\|" inner)))
-                     (nonempty (remove-if #'zerop (mapcar #'length cells))))
-                (unless (and nonempty
-                             (every (lambda (c) (every (lambda (ch) (find ch "-+:")) c))
-                                    nonempty))
-                  (push cells rows)))))
+          :do (let* ((open (position #\| line))
+                     (close (position #\| line :from-end t)))
+                (when (and open close (< open close))
+                  (let* ((inner (subseq line (1+ open) close))
+                         (cells (mapcar (lambda (c) (string-trim " " c))
+                                        (ppcre:split "\\|" inner)))
+                         ;; a separator row consists only of -, +, :, and
+                         ;; spaces in every cell
+                         (separator (and cells
+                                         (every (lambda (c)
+                                                  (and (plusp (length c))
+                                                       (every (lambda (ch)
+                                                                (find ch "-+ :"))
+                                                              c)))
+                                                cells))))
+                    (unless separator
+                      (push cells rows)))))))
     (setf rows (nreverse rows))
     (if rows
         (values (car rows) (cdr rows))

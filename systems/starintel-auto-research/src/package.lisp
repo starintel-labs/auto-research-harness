@@ -41,9 +41,11 @@
    #:design-reviewed-p
    #:append-research-update
    #:read-research-node
-   #:write-ardr-issue-transaction
-   #:find-ardr-issue-transaction
-   #:org-lexical-search
+    #:write-ardr-issue-transaction
+    #:find-ardr-issue-transaction
+    #:org-lexical-search
+    #:validate-design-node
+    #:render-design-provenance
 
    ;; run/candidate ledgers
    #:run-ledger
@@ -69,15 +71,34 @@
    #:find-budget-profile
    #:find-research-repository
    #:find-project-config
+   #:find-project-config-or-fail
    #:clear-configs
+   #:unknown-project-error
    #:project-config-id
    #:project-config-repository
+   #:project-config-source-path
    #:project-config-roam-slug
    #:project-config-rlm-mode
    #:project-config-method
    #:project-config-budget-name
    #:project-config-research-repository
+   #:project-config-prompt-profile
    #:project-config-incoming
+
+   ;; project prompt profiles
+   #:prompt-profile-dir
+   #:project-prompt-files
+   #:project-prompt-context
+
+   ;; run evidence bundle
+   #:*ar-current-run-id*
+   #:ar-note-research-artifact
+   #:ar-note-evidence
+   #:run-evidence-bundle
+   #:project-evidence-bundle
+   #:evidence-grounding-problem
+   #:design-basis-items
+   #:design-evidence-rows
 
    ;; runtime accessors
    #:ar-root
@@ -102,9 +123,12 @@
    #:ar-stage-error
    #:ar-submit-candidate
    #:ar-candidate-transition
-   #:ar-record-review
-   #:ar-revision-counts
-   #:ar-submit-research
+    #:ar-record-review
+    #:ar-revision-counts
+    #:ar-run-artifacts-slot
+    #:ar-run-evidence-slot
+    #:ar-submit-research
+    #:make-ar-stage-context
    #:ensure-path-in-store%/
    #:org-roam-root
    #:org-lexical-search

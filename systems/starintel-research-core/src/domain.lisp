@@ -143,6 +143,8 @@ unique: identity is (instance, repository, number)."
    (project :initarg :project :reader request-project)
    (question :initarg :question :reader request-question :type string)
    (source :initarg :source :reader request-source)                ; :api | :forgejo | :cli
+   (input-kind :initarg :input-kind :initform nil :reader request-input-kind) ; :file | :text
+   (input-path :initarg :input-path :initform nil :reader request-input-path)
    (issue-ref :initarg :issue-ref :initform nil :reader request-issue-ref)
    (status :initarg :status :accessor request-status)
    (run-ids :initarg :run-ids :accessor request-run-ids :type list)

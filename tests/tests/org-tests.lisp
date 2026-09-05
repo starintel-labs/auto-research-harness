@@ -92,6 +92,25 @@
     (is (search "#+approval_decided_at: NONE" rendered))
     (is (search "#+approval_state: PENDING" rendered))))
 
+(test org-table-rows-skips-separators-and-parses-cells
+  ;; regression: org-table-rows applied the separator check to row-length
+  ;; integers, signalling a type error on any non-separator row
+  (multiple-value-bind (header rows)
+      (ar:org-table-rows
+       "| Claim | Evidence | Kind |
+|-------+----------+------|
+| a claim | roam/research/p/a.org | finding |
+| another | https://example.org | source |")
+    (is (equal '("Claim" "Evidence" "Kind") header))
+    (is (= 2 (length rows)))
+    (is (equal '("a claim" "roam/research/p/a.org" "finding") (first rows)))
+    (is (equal '("another" "https://example.org" "source") (second rows))))
+  ;; a table with no rows yields nil header and rows
+  (multiple-value-bind (header rows)
+      (ar:org-table-rows "no table here")
+    (is-false header)
+    (is-false rows)))
+
 (test generated-corpus-passes-canonical-validators
   ;; Generated artifacts must pass the CURRENT Auto Research validators:
   ;; scripts/validate-docs.py of the canonical checkout.

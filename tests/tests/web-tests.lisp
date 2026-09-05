@@ -107,7 +107,38 @@
         (multiple-value-bind (sse-response sse-status)
             (http :get (format nil "/api/v1/runs/~a/events/stream" run-id) nil "token-readonly")
           (is (= 200 sse-status))
-          (is (search "event:" sse-response)))))))
+          (is (search "event:" sse-response))))))
+  ;; unknown project ids fail clearly with 404, never a silent default
+  (with-test-api
+    (multiple-value-bind (response status)
+        (http :post "/api/v1/projects/star-lanng/research"
+              "{\"question\":\"q\"}" "token-operator")
+      (declare (ignore response))
+      (is (= 404 status)))
+    (multiple-value-bind (response status)
+        (http :get "/api/v1/projects/star-lanng" nil "token-readonly")
+      (declare (ignore response))
+      (is (= 404 status)))))
+
+(test api-submit-records-input-provenance
+  ;; the resolved invocation shape (file vs text) is retained on the request
+  (with-test-api
+    (multiple-value-bind (response status)
+        (http :post "/api/v1/projects/prolog-rlm/research"
+              "{\"question\":\"q\",\"input_kind\":\"file\",\"input_path\":\"prompts/prolog-rlm/question.md\"}"
+              "token-operator")
+      (declare (ignore status))
+      (let ((run-id (rlm.i:jstr (rlm.i:json-parse response) "run_id")))
+        (let ((request-id (rc:request-id
+                           (ar:ar-get-request
+                            web:*runtime*
+                            (rc:run-request-id (ar:ar-get-run web:*runtime* run-id))))))
+          (multiple-value-bind (request-response request-status)
+              (http :get (format nil "/api/v1/requests/~a" request-id)
+                    nil "token-readonly")
+            (is (= 200 request-status))
+            (is (search "\"input_kind\":\"file\"" request-response))
+            (is (search "prompts/prolog-rlm/question.md" request-response))))))))
 
 (test api-requests-runs-cancel
   (with-test-api
@@ -174,6 +205,24 @@
               "{\"candidate_id\":\"nope\"}" "token-operator")
       (declare (ignore response))
       (is (member status '(400 404 409))))))
+
+(test api-run-candidates-view
+  ;; regression: run-sub-view applied `car` to candidate id strings, so the
+  ;; candidates endpoint returned 500 once any candidate existed
+  (with-test-api
+    (multiple-value-bind (request run)
+        (ar:ar-submit-research web:*runtime*
+                               (ar:find-project-config "prolog-rlm")
+                               "Candidates view")
+      (declare (ignore request))
+      (let ((id (ar:ar-submit-candidate web:*runtime* (rc:run-id run)
+                                        "p" "h" "pr" "f"
+                                        nil :evidence "src/x.lisp")))
+        (multiple-value-bind (response status)
+            (http :get (format nil "/api/v1/runs/~a/candidates" (rc:run-id run))
+                  nil "token-readonly")
+          (is (= 200 status))
+          (is (search id response)))))))
 
 (test api-runtime-and-dashboard
   (with-test-api

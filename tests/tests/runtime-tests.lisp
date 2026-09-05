@@ -10,20 +10,57 @@
     (ar:clear-configs)
     (eval '(ar:define-budget normal-research))
     (eval `(ar:define-research-repository main-research
-             :path ,root
-             :forgejo (:base-url "https://git.example"
-                       :repository "lost-rob0t/starintel-auto-research")))
+              :path ,root
+              :forgejo (:base-url "https://git.example"
+                        :repository "lost-rob0t/starintel-auto-research")))
     (eval '(ar:define-project prolog-rlm
-             :repository "lost-rob0t/prolog-rlm"
-             :research-repository main-research
-             :roam-project "prolog-rlm"
-             :budget normal-research))
+              :repository "lost-rob0t/prolog-rlm"
+              :research-repository main-research
+              :roam-project "prolog-rlm"
+              :budget normal-research))
     (eval '(ar:define-project auto-research
-             :repository "lost-rob0t/starintel-auto-research"
-             :research-repository main-research
-             :roam-project "auto-research"
-             :budget normal-research))
+              :repository "lost-rob0t/starintel-auto-research"
+              :research-repository main-research
+              :roam-project "auto-research"
+              :budget normal-research))
+    (install-star-lang-fixture root)
+    (eval `(ar:define-project star-lang
+              :repository "lost-rob0t/star-lang"
+              :source-path ,(namestring (uiop:merge-pathnames* "target-repo/" root))
+              :research-repository main-research
+              :roam-project "star-lang"
+              :prompt-profile "star-lang"
+              :budget normal-research))
     runtime))
+
+(defun install-star-lang-fixture (root)
+  "Fixture source repository (the target being researched) and fixture
+prompt profile files, both beneath the temp corpus root. Distinct from
+the roam/ corpus: the target repository must never be conflated with it."
+  (let ((src (ensure-directories-exist
+              (uiop:merge-pathnames* "target-repo/src/" root))))
+    (with-open-file (out (merge-pathnames "parser.lisp" src)
+                         :direction :output :if-exists :supersede)
+      (write-line ";; canonical star-lang parser fixture" out)
+      (write-line "(in-package :star.lang.parser)" out)
+      (write-line "(defun parse-star-file (file) file)" out))
+    (with-open-file (out (uiop:merge-pathnames* "target-repo/README.md" root)
+                         :direction :output :if-exists :supersede)
+      (write-line "# star-lang fixture repository" out))
+    (let ((prompts (ensure-directories-exist
+                    (uiop:merge-pathnames* "prompts/star-lang/" root))))
+      (with-open-file (out (merge-pathnames "context.md" prompts)
+                           :direction :output :if-exists :supersede)
+        (write-line "star-lang investigates the Common Lisp star-lang repository." out)
+        (write-line "Every finding must cite a file, symbol, or commit of that repository." out))
+      (with-open-file (out (merge-pathnames "design.md" prompts)
+                           :direction :output :if-exists :supersede)
+        (write-line "Design decisions must trace to recorded star-lang research evidence." out)))
+    (let ((auto-prompts (ensure-directories-exist
+                         (uiop:merge-pathnames* "prompts/auto-research/" root))))
+      (with-open-file (out (merge-pathnames "context.md" auto-prompts)
+                           :direction :output :if-exists :supersede)
+        (write-line "auto-research investigates the Auto Research harness itself." out)))))
 
 ;;; ------------------------------------------------------------ ledgers
 

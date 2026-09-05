@@ -199,7 +199,10 @@ derivation so the design note and the design review resolve the same file."
   "Canonical design node skeleton: stable :ID:, required keywords, the
 canonical Approval Table (never fabricated: all rows PENDING/NOT STARTED
 or justified NOT APPLICABLE) and Changelog required by
-scripts/validate-docs.py, plus the design glossary."
+scripts/validate-docs.py, plus the design glossary. A research-derived
+design REQUIRES its research basis: the Research basis row is PENDING
+with the Research Basis section as its evidence reference, never NOT
+APPLICABLE."
   (let ((today (subseq (sar.i:now-iso8601) 0 10)))
     (format nil ":PROPERTIES:
 :ID:       ~a
@@ -218,7 +221,7 @@ scripts/validate-docs.py, plus the design glossary."
 
 | Approval area | Required authority | State | Evidence required | Evidence reference |
 |---------------+--------------------+-------+-------------------+--------------------|
-| Research basis | Research reviewer | NOT APPLICABLE | Design note follows the recorded research basis | Linked research node |
+| Research basis | Research reviewer | PENDING | Research nodes and evidence recorded in the Research Basis section | Research Basis section |
 | Architecture | Project maintainer | PENDING | Design review and resolved contradictions | |
 | Security | Security reviewer | PENDING | Authorization, disclosure, and secret-handling review | |
 | Operations | Operator | PENDING | Operational policy, budgets, monitoring, and rollback review | |
@@ -236,12 +239,44 @@ scripts/validate-docs.py, plus the design glossary."
 - *Actor* — An independently stateful component that processes messages through a defined protocol.
 " id title description status filetags status today)))
 
-(defun write-design-node (store slug run-id title design-text)
+(defun table-cell (value)
+  "One bounded, pipe-safe Org table cell from a model- or evidence-supplied value."
+  (let* ((text (princ-to-string (or value "")))
+         (flat (ppcre:regex-replace-all "[\\t\\r\\n|]+" text " ")))
+    (string-trim " " flat)))
+
+(defun render-design-provenance (research-basis evidence-rows)
+  "CL-owned canonical provenance sections for a research-derived design:
+Research Basis (the research nodes this design is grounded in) and
+Evidence Used (claim/evidence/kind rows). The model can never forge
+these sections: sanitize-model-text demotes heading-like lines, and
+these sections are spliced in by CL from the run evidence bundle."
+  (with-output-to-string (out)
+    (format out "~%* Research Basis~%~%")
+    (if research-basis
+        (dolist (item research-basis)
+          (format out "- ~a~%" (table-cell item)))
+        (format out "- (none recorded)~%"))
+    (format out "~%* Evidence Used~%~%")
+    (format out "| Claim | Evidence | Kind |~%")
+    (format out "|-------+----------+------|~%")
+    (if evidence-rows
+        (dolist (row evidence-rows)
+          (format out "| ~a | ~a | ~a |~%"
+                  (table-cell (first row))
+                  (table-cell (second row))
+                  (table-cell (third row))))
+        (format out "| (none recorded) | (none recorded) | none |~%"))))
+
+(defun write-design-node (store slug run-id title design-text
+                          &key research-basis evidence-rows)
   "Create the canonical design node for RUN-ID of project SLUG with the
-bounded DESIGN-TEXT (model-supplied, CL-serialized) as the objective body.
-Idempotent: an existing node is returned unchanged. CL owns all Org
-formatting; the model never writes Org directly. Returns the absolute
-path."
+bounded DESIGN-TEXT (model-supplied, CL-serialized) as the objective
+body. RESEARCH-BASIS and EVIDENCE-ROWS come from the run evidence
+bundle; CL renders them as the canonical Research Basis and Evidence
+Used provenance sections. Idempotent: an existing node is returned
+unchanged. CL owns all Org formatting; the model never writes Org
+directly. Returns the absolute path."
   (let ((path (design-node-path store slug run-id)))
     (if (probe-file path)
         path
@@ -255,12 +290,138 @@ path."
                       (format nil "Design note for run ~a of project ~a."
                               (sar.i:slugify run-id) (sar.i:slugify slug))
                       status tags))
-               (text (org-replace-section text "Objective"
-                                          (format nil "* Objective~%~%~a~%" safe-text))))
+               (text (org-replace-section
+                      text "Objective"
+                      (format nil "* Objective~%~%~a~%~a"
+                              safe-text
+                              (render-design-provenance research-basis evidence-rows)))))
           (ensure-directories-exist path)
           (with-open-file (out path :direction :output :external-format :utf-8)
             (write-string text out))
           path))))
+
+(defun resolve-store-reference (store reference)
+  "Resolve a design evidence reference within the corpus: roam-relative
+paths must exist, id: references must name an existing node. Returns the
+reference when resolvable, nil otherwise."
+  (when (and (stringp reference) (plusp (length reference)))
+    (cond
+      ((uiop:string-prefix-p "roam/" reference)
+       (let ((path (merge-pathnames reference (org-roam-root store))))
+         (and (probe-file path) reference)))
+      ((uiop:string-prefix-p "id:" reference)
+       (let* ((wanted (subseq reference 3))
+              (roam (merge-pathnames "roam/" (org-roam-root store)))
+              (found))
+         (labels ((walk (dir)
+                    (dolist (file (uiop:directory-files dir "*.org"))
+                      (let ((text (ignore-errors (uiop:read-file-string file))))
+                        (when (and text (search wanted text))
+                          (setf found t))))
+                    (dolist (sub (uiop:subdirectories dir))
+                      (unless found (walk sub)))))
+           (walk roam)
+           (and found reference))))
+      ;; URLs, citations, candidate ids, and source strings are accepted
+      ;; as opaque evidence references when non-empty
+      (t reference))))
+
+(defun design-list-items (section-text)
+  "The non-empty `- ` list items of SECTION-TEXT."
+  (let ((items))
+    (with-input-from-string (in (or section-text ""))
+      (loop
+        :for line := (read-line in nil nil)
+        :while line
+        :do (let ((trimmed (string-trim " " line)))
+              (when (uiop:string-prefix-p "- " trimmed)
+                (let ((item (string-trim " " (subseq trimmed 2))))
+                  (when (plusp (length item))
+                    (push item items)))))))
+    (nreverse items)))
+
+(defun validate-design-node (store slug run-id)
+  "Structural validation of the design node for RUN-ID of project SLUG.
+A design does not count as valid merely because its file exists. Checks:
+the node exists at the canonical path for the project/run identity, the
+objective is non-empty, the Research Basis section lists at least one
+reference that resolves inside the corpus, and the Evidence Used table
+has at least one row whose evidence reference resolves. Returns
+(values valid-p reasons)."
+  (let ((path (design-node-path store slug run-id))
+        (reasons))
+    (unless (probe-file path)
+      (push (format nil "design node missing: roam/design/~a/design-~a.org"
+                     (sar.i:slugify slug) (sar.i:slugify run-id))
+            reasons))
+    (when (probe-file path)
+      (let* ((text (uiop:read-file-string path)))
+        ;; objective section: present and non-empty
+        (multiple-value-bind (obj-start obj-end)
+            (org-section-bounds text "Objective")
+          (declare (ignore obj-end))
+          (if (null obj-start)
+              (push "objective section missing" reasons)
+              (let ((body (string-trim
+                           " \t"
+                           (ppcre:regex-replace-all
+                            "^\\* Objective\\s*"
+                            (subseq text obj-start (min (length text) (+ obj-start 4096)))
+                            ""))))
+                (when (zerop (length body))
+                  (push "design objective is empty" reasons)))))
+        ;; research basis: present, with at least one resolvable reference
+        (multiple-value-bind (basis-start basis-end)
+            (org-section-bounds text "Research Basis")
+          (if (null basis-start)
+              (push "research basis section missing" reasons)
+              (let* ((section (subseq text basis-start basis-end))
+                     (items (design-list-items section))
+                     (resolvable
+                       (loop :for item :in items
+                             :for refs := (ppcre:all-matches-as-strings
+                                           "(roam/[^)\\s]+|id:[^)\\s]+)" item)
+                             :thereis (and refs
+                                           (every (lambda (ref)
+                                                    (resolve-store-reference store ref))
+                                                  refs)))))
+                (when (null items)
+                  (push "research basis records no reference" reasons))
+                (unless (or resolvable
+                            (and (= (length items) 1)
+                                 (search "none recorded" (first items))))
+                  (push "research basis records no resolvable research node"
+                        reasons))
+                (dolist (item items)
+                  (dolist (ref (ppcre:all-matches-as-strings
+                                "(roam/[^)\\s]+|id:[^)\\s]+)" item))
+                    (unless (resolve-store-reference store ref)
+                      (push (format nil "unresolved research basis reference: ~a" ref)
+                            reasons)))))))
+        ;; evidence used: a resolvable row of claim/evidence/kind
+        (multiple-value-bind (evidence-start evidence-end)
+            (org-section-bounds text "Evidence Used")
+          (if (null evidence-start)
+              (push "evidence-used section missing" reasons)
+              (let* ((section (subseq text evidence-start evidence-end))
+                     (rows (nth-value 1 (org-table-rows section))))
+                (unless (and rows
+                             (every (lambda (row)
+                                      (and (>= (length row) 2)
+                                           (plusp (length (first row)))
+                                           (plusp (length (second row)))
+                                           (not (search "none recorded" (second row)))))
+                                    rows))
+                  (push "evidence-used table records no resolvable evidence row"
+                        reasons))
+                (dolist (row rows)
+                  (when (>= (length row) 2)
+                    (dolist (ref (ppcre:all-matches-as-strings
+                                  "(roam/[^)\\s|]+|id:[^)\\s|]+)" (second row)))
+                      (unless (resolve-store-reference store ref)
+                        (push (format nil "unresolved evidence reference: ~a" ref)
+                              reasons))))))))))
+    (values (null reasons) (nreverse reasons))))
 
 (defun org-replace-section (text title replacement)
   "Replace the level-1 section TITLE in TEXT with REPLACEMENT (which

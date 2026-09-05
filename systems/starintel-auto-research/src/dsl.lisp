@@ -26,12 +26,17 @@
 (defclass project-config ()
   ((id :initarg :id :reader project-config-id)
    (repository :initarg :repository :reader project-config-repository)
+   ;; the SOURCE repository being researched (local read-only checkout).
+   ;; Distinct from RESEARCH-REPOSITORY, which is the research corpus.
+   (source-path :initarg :source-path :initform nil
+                :reader project-config-source-path)
    (research-repository :initarg :research-repository
                         :reader project-config-research-repository)
    (method :initarg :method :initform :aradr :reader project-config-method)
    (roam-project :initarg :roam-project :reader project-config-roam-slug)
    (budget :initarg :budget :reader project-config-budget-name)
    (rlm :initarg :rlm :initform '(:mode :direct :profile :research))
+   (prompt-profile :initarg :prompt-profile :initform nil)
    (incoming :initarg :incoming :initform nil :reader project-config-incoming)))
 
 (defmethod project-config-rlm-mode ((config project-config))
@@ -40,6 +45,14 @@
 (defmethod project-config-rlm-profile ((config project-config))
   (getf (slot-value config 'rlm) :profile :research))
 
+(defmethod project-config-prompt-profile ((config project-config))
+  "The prompt profile name for CONFIG; defaults to the project id."
+  (or (slot-value config 'prompt-profile) (project-config-id config)))
+
+(define-condition unknown-project-error (research-core:validation-error)
+  ()
+  (:report (lambda (c s)
+             (format s "unknown project: ~a" (research-core:core-error-message c)))))
 (defvar *budget-profiles* (make-hash-table :test #'equal))
 (defvar *research-repositories* (make-hash-table :test #'equal))
 (defvar *project-configs* (make-hash-table :test #'equal))
@@ -82,10 +95,13 @@
      (setf (gethash ,(string-downcase (symbol-name name)) *research-repositories*)
            config)))
 
-(defmacro define-project (id &key repository research-repository roam-project method
-                                 budget rlm incoming)
+(defmacro define-project (id &key repository source-path research-repository roam-project
+                                 method budget rlm prompt-profile incoming)
   "Define a project from TRUSTED init configuration. Reference names are
-symbols; forgejo/rlm/incoming are literal data and are never evaluated."
+symbols; forgejo/rlm/incoming are literal data and are never evaluated.
+SOURCE-PATH is the local checkout of the source repository being
+researched (read-only; distinct from the research corpus). PROMPT-PROFILE
+names the prompts/<profile>/ directory; it defaults to the project id."
   (let ((id-string (string-downcase (symbol-name id)))
         (repo-name (and research-repository (string-downcase (symbol-name research-repository))))
         (budget-name (and budget (string-downcase (symbol-name budget)))))
@@ -107,13 +123,27 @@ symbols; forgejo/rlm/incoming are literal data and are never evaluated."
              (make-instance 'project-config
                             :id ,id-string
                             :repository ,repository
+                            :source-path (resolve-project-source-path ,id-string ,source-path)
                             :research-repository (gethash ,repo-name
                                                           *research-repositories*)
                             :roam-project ,(or roam-project id-string)
                             :method ',(or method :aradr)
                             :budget ,budget-name
                             :rlm ',rlm
+                            :prompt-profile ,(when prompt-profile
+                                               (string-downcase (string prompt-profile)))
                             :incoming ',incoming)))))
+
+(defun resolve-project-source-path (id path)
+  "Trusted-config validation: a project SOURCE-PATH must be an existing
+directory; it is resolved to an absolute namestring. Nil means the project
+configures no local source checkout (repository tools then fail closed)."
+  (when path
+    (unless (uiop:directory-exists-p path)
+      (error 'research-core:validation-error
+             :message (format nil "project ~a source-path ~s is not an existing directory"
+                              id (namestring (pathname path)))))
+    (namestring (truename path))))
 
 (defun find-budget-profile (name)
   (gethash (string-downcase (string name)) *budget-profiles*))
@@ -123,3 +153,9 @@ symbols; forgejo/rlm/incoming are literal data and are never evaluated."
 
 (defun find-project-config (id)
   (gethash (string-downcase (string id)) *project-configs*))
+
+(defun find-project-config-or-fail (id)
+  "Strict project resolution: an unknown project id is an
+unknown-project-error, never a silent fallback to a default project."
+  (or (find-project-config id)
+      (error 'unknown-project-error :message (string-downcase (string id)))))

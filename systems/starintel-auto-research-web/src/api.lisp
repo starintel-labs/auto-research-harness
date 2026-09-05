@@ -66,6 +66,10 @@ or nil. Used by handle-api clauses."
       (json-error 401 (format nil "~a" condition)))
     (rc:authorization-error (condition)
       (json-error 403 (format nil "~a" condition)))
+    (ar:unknown-project-error (condition)
+      ;; unknown project ids fail clearly (404), never fall back to a
+      ;; default project
+      (json-error 404 (format nil "~a" condition)))
     (rc:validation-error (condition)
       (json-error 400 (format nil "~a" condition)))
     (rc:core-error (condition)
@@ -84,8 +88,12 @@ or nil. Used by handle-api clauses."
 
 (defun project-config-or-404 (project-id)
   (or (ar:find-project-config project-id)
-      (error 'rc:validation-error
-             :message (format nil "unknown project: ~a" project-id))))
+      (error 'ar:unknown-project-error
+             :message (format nil "~a (configured: ~{~a~^, ~})"
+                              project-id
+                              (sort (loop :for id :being :the :hash-keys :of (ar:project-configs)
+                                          :collect id)
+                                    #'string<)))))
 
 (defun handle-run-pending ()
   "Trigger ar-run-pending for queued runs. The stage walk executes in a
@@ -234,25 +242,33 @@ progress is observable through run events / SSE. An optional body
 
 (defun handle-submit-research (project-id)
   (with-auth (:|research:submit|)
-    (project-config-or-404 project-id)
-    (let* ((body (read-json-body))
-           (question (and body (gethash "question" body))))
-      (unless (and question (stringp question))
-        (return-from handle-submit-research (json-error 400 "body must contain a bounded question")))
-      (multiple-value-bind (request run issue-number existing-p)
-          (ar:ar-submit-research *runtime*
-                                 (ar:find-project-config project-id)
-                                 question
-                                 :source :api)
-        (declare (ignore request))
-        (json-ok (alexandria:plist-hash-table
-                  (list "status" "accepted"
-                        "run_id" (rc:run-id run)
-                        "request_status" (string-downcase (symbol-name (rc:run-status run)))
-                        "forgejo_issue" (and issue-number (format nil "~a" issue-number))
-                        "issue_existed" existing-p)
-                  :test #'equal)
-                 202)))))
+    (let ((project (project-config-or-404 project-id)))
+      (let* ((body (read-json-body))
+             (question (and body (gethash "question" body)))
+             (input-kind (and body (gethash "input_kind" body)))
+             (input-path (and body (gethash "input_path" body))))
+        (unless (and question (stringp question))
+          (return-from handle-submit-research (json-error 400 "body must contain a bounded question")))
+        (unless (or (null input-kind)
+                    (member input-kind '("file" "text") :test #'string=))
+          (return-from handle-submit-research (json-error 400 "input_kind must be file or text")))
+        (multiple-value-bind (request run issue-number existing-p)
+            (ar:ar-submit-research *runtime*
+                                   project
+                                   question
+                                   :source :api
+                                   :input-kind (and input-kind
+                                                    (intern (string-upcase input-kind) :keyword))
+                                   :input-path input-path)
+          (declare (ignore request))
+          (json-ok (alexandria:plist-hash-table
+                    (list "status" "accepted"
+                          "run_id" (rc:run-id run)
+                          "request_status" (string-downcase (symbol-name (rc:run-status run)))
+                          "forgejo_issue" (and issue-number (format nil "~a" issue-number))
+                          "issue_existed" existing-p)
+                    :test #'equal)
+                   202))))))
 
 (defun handle-artifact (artifact-id source-p)
   (let* ((store (ar:ar-store *runtime*))
@@ -343,7 +359,10 @@ carry the configured secret."
    (list "id" id
          "roam_subtree" (ar:project-config-roam-slug config)
          "method" (string-downcase (symbol-name (ar:project-config-method config)))
-         "rlm_mode" (string-downcase (symbol-name (ar:project-config-rlm-mode config))))
+         "rlm_mode" (string-downcase (symbol-name (ar:project-config-rlm-mode config)))
+         "prompt_profile" (ar:project-config-prompt-profile config)
+         "source_repository" (ar:project-config-repository config)
+         "source_path" (ar:project-config-source-path config))
    :test #'equal))
 
 (defun projects-view ()
@@ -362,12 +381,23 @@ carry the configured secret."
           :do (push (request-view request) requests))
     (alexandria:plist-hash-table (list "requests" (nreverse requests)) :test #'equal)))
 
+(defun request-project-id (request)
+  "The project identity of a request, whether the project object is the
+ar-runtime project-config or a research-core project."
+  (let ((project (rc:request-project request)))
+    (typecase project
+      (ar:project-config (ar:project-config-id project))
+      (t (rc:project-id project)))))
+
 (defun request-view (request)
   (alexandria:plist-hash-table
    (list "id" (rc:request-id request)
-         "project" (rc:project-id (rc:request-project request))
+         "project" (request-project-id request)
          "question" (rc:request-question request)
          "source" (string-downcase (symbol-name (rc:request-source request)))
+         "input_kind" (and (rc:request-input-kind request)
+                           (string-downcase (symbol-name (rc:request-input-kind request))))
+         "input_path" (rc:request-input-path request)
          "status" (string-downcase (symbol-name (rc:request-status request)))
          "created_at" (rc:request-created-at request))
    :test #'equal))
@@ -403,13 +433,13 @@ carry the configured secret."
 (defun run-sub-view (run-id action)
   (cond
     ((string= action "candidates")
-     (alexandria:plist-hash-table
-      (list "candidates"
-            (mapcar (lambda (c) (candidate-view (car c) nil))
-                    (sort (loop :for id :being :the :hash-keys :of (ar:ar-candidates *runtime*)
-                                :collect id)
-                          #'string<)))
-      :test #'equal))
+      (alexandria:plist-hash-table
+       (list "candidates"
+             (mapcar (lambda (id) (candidate-view id nil))
+                     (sort (loop :for id :being :the :hash-keys :of (ar:ar-candidates *runtime*)
+                                 :collect id)
+                           #'string<)))
+       :test #'equal))
     ((string= action "reviews")
      (alexandria:plist-hash-table (list "reviews" nil) :test #'equal))
     ((string= action "artifacts")

@@ -68,21 +68,57 @@
   ;; unknown research repository
   (signals research-core:validation-error
     (eval '(ar:define-project bad-repo
-             :repository "org/x"
-             :research-repository nonexistent-repo
-             :budget nil)))
+              :repository "org/x"
+              :research-repository nonexistent-repo
+              :budget nil)))
   ;; missing repository entirely
   (signals research-core:validation-error
     (eval '(ar:define-project no-repo
-             :research-repository nil
-             :budget nil)))
+              :research-repository nil
+              :budget nil)))
   ;; missing budget reference
   (eval '(ar:define-research-repository main-research :path "/tmp/opencode/arh-corpus"))
   (signals research-core:validation-error
     (eval '(ar:define-project bad-budget
+              :repository "org/x"
+              :research-repository main-research
+              :budget nonexistent-budget))))
+
+(test dsl-prompt-profile-and-source-path
+  (setup-dsl-fixtures)
+  ;; the prompt profile defaults to the project id
+  (eval '(ar:define-project defaulted-profile
+           :repository "org/x"
+           :research-repository main-research
+           :budget normal-research))
+  (is (string= "defaulted-profile"
+               (ar:project-config-prompt-profile
+                (ar:find-project-config "defaulted-profile"))))
+  ;; an explicit profile is kept
+  (eval '(ar:define-project starred
+           :repository "org/x"
+           :research-repository main-research
+           :prompt-profile star-lang
+           :budget normal-research))
+  (is (string= "star-lang"
+               (ar:project-config-prompt-profile (ar:find-project-config "starred"))))
+  ;; a source path that is not an existing directory is rejected
+  (signals research-core:validation-error
+    (eval '(ar:define-project bad-source
              :repository "org/x"
              :research-repository main-research
-             :budget nonexistent-budget))))
+             :source-path "/tmp/opencode/definitely-not-a-directory-arh/"
+             :budget normal-research)))
+  ;; an existing directory is resolved to an absolute namestring
+  (let ((dir (ensure-directories-exist "/tmp/opencode/arh-source-fixture/")))
+    (eval `(ar:define-project good-source
+              :repository "org/x"
+              :research-repository main-research
+              :source-path ,(namestring dir)
+              :budget normal-research))
+    (let ((path (ar:project-config-source-path (ar:find-project-config "good-source"))))
+      (is (plusp (length path)))
+      (is (char= #\/ (char path (1- (length path))))))))
 
 (test dsl-same-issue-number-two-repos-distinct-identity
   ;; same issue number in two repositories must not collide

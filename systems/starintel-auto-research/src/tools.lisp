@@ -142,82 +142,199 @@ RUNTIME. Returns the registry."
                      "excerpt" (excerpt text 1200))))))
   (register-semantic-tool
    registry runtime "repository-read"
-   "Read one UTF-8 file beneath the configured research repository root. Rejects traversal."
+   "Read one UTF-8 file beneath the ACTIVE RUN's configured source repository root (the repository being researched), never the research corpus. Rejects traversal."
    (list "path" "string") (list "path")
    :read
    (lambda (args)
-     (uiop:read-file-string
-      (ensure-path-in-store%/ (ar-store runtime)
-                              (require-string-field args "path")))))
+     (let* ((path (ensure-repository-path runtime (require-string-field args "path")))
+            (text (uiop:read-file-string path)))
+       (note-repository-observation runtime path "repository-read")
+       (excerpt text 4096))))
+  (register-semantic-tool
+   registry runtime "repository-list"
+   "List files beneath a directory of the ACTIVE RUN's configured source repository. Returns bounded relative paths; never reads the research corpus."
+   (list "path" "string" "limit" "number") '()
+   :read
+   (lambda (args)
+     (let* ((limit (min (or (gethash "limit" args) 200) 1000))
+            (root-path (ensure-repository-path runtime (or (gethash "path" args) "")))
+            (root (pathname (current-repository-root runtime)))
+            (files))
+       (labels ((git-dir-p (dir)
+                  (search ".git" (namestring dir)))
+                (walk (dir)
+                  (unless (git-dir-p dir)
+                    (dolist (file (uiop:directory-files dir))
+                      (when (< (length files) limit)
+                        (push file files)))
+                    (dolist (sub (uiop:subdirectories dir))
+                      (when (< (length files) limit)
+                        (walk sub))))))
+         (walk root-path))
+       (note-repository-observation runtime root-path "repository-list")
+       (sar.i:dict
+        "repository" (or (repository-label runtime) "unknown")
+        "files" (mapcar (lambda (file)
+                          (enough-namestring file root))
+                        (nreverse files))
+        "truncated" (>= (length files) limit)))))
+  (register-semantic-tool
+   registry runtime "repository-search"
+   "Literal text search across Lisp files of the ACTIVE RUN's configured source repository. Returns bounded path:line matches; never reads the research corpus."
+   (list "query" "string" "limit" "number") (list "query")
+   :read
+   (lambda (args)
+     (let* ((query (require-string-field args "query"))
+            (limit (min (or (gethash "limit" args) 20) 100))
+            (root-path (ensure-repository-path runtime ""))
+            (root (pathname (current-repository-root runtime)))
+            (matches)
+            (scanned 0))
+       (flet ((search-file (file)
+                (incf scanned)
+                (let ((text (ignore-errors (uiop:read-file-string file))))
+                  (when (and text (< (length matches) limit))
+                    (let ((lines (ppcre:split "\\n" text)))
+                      (loop :for line :in lines
+                            :for n :from 1
+                            :when (and (search query line :test #'char-equal)
+                                       (< (length matches) limit))
+                              :do (push (format nil "~a:~a: ~a"
+                                                (enough-namestring file root)
+                                                n
+                                                (excerpt (string-trim " " line) 160))
+                                        matches)
+                              :and :do (return)))))))
+         (labels ((git-dir-p (dir)
+                    (search ".git" (namestring dir)))
+                  (walk (dir)
+                    (unless (git-dir-p dir)
+                      (dolist (file (uiop:directory-files dir "*.lisp"))
+                        (search-file file))
+                      (dolist (sub (uiop:subdirectories dir))
+                        (walk sub)))))
+           (walk root-path)))
+       (note-repository-observation runtime root-path "repository-search")
+       (sar.i:dict
+        "repository" (or (repository-label runtime) "unknown")
+        "matches" (nreverse matches)
+        "files-scanned" scanned))))
+  (register-semantic-tool
+   registry runtime "repository-info"
+   "Read-only git metadata (HEAD and recent commits) of the ACTIVE RUN's configured source repository, when supported. Never reads the research corpus."
+   (list) '()
+   :read
+   (lambda (args)
+     (declare (ignore args))
+     (let* ((repo-root (ensure-repository-path runtime ""))
+            (root (current-repository-root runtime)))
+       (note-repository-observation runtime repo-root "repository-info")
+       (labels ((git (arguments)
+                  (nth-value 0
+                             (uiop:run-program (append (list "git" "-C" root) arguments)
+                                               :output :string :error-output :string
+                                               :ignore-error-status t))))
+         (sar.i:dict
+          "repository" (or (repository-label runtime) "unknown")
+          "head" (string-trim " \n" (git (list "rev-parse" "HEAD")))
+          "recent-commits" (string-trim " \n" (git (list "log" "--oneline" "-5"))))))))
   ;; semantic write tools ----------------------------------------------
-  (register-semantic-tool
-   registry runtime "record-source"
-   "Record one retrieved source (URL or citation text) with its retrieval date on a research node."
-   (list "path" "string" "source" "string") (list "path" "source")
-   :write
-   (lambda (args)
-     (append-research-update
-      (ensure-path-in-store%/ (ar-store runtime)
-                              (require-string-field args "path"))
-      :sources (list (require-string-field args "source")))))
-  (register-semantic-tool
-   registry runtime "record-finding"
-   "Record one bounded finding on a research node."
-   (list "path" "string" "finding" "string") (list "path" "finding")
-   :write
-   (lambda (args)
-     (append-research-update
-      (ensure-path-in-store%/ (ar-store runtime)
-                              (require-string-field args "path"))
-      :findings (require-string-field args "finding"))))
-  (register-semantic-tool
-   registry runtime "record-counterevidence"
-   "Record contrary evidence on a research node. Every material claim needs explicit contrary evidence."
-   (list "path" "string" "evidence" "string") (list "path" "evidence")
-   :write
-   (lambda (args)
-     (append-research-update
-      (ensure-path-in-store%/ (ar-store runtime)
-                              (require-string-field args "path"))
-      :findings (format nil "Counterevidence: ~a"
-                        (require-string-field args "evidence")))))
-  (register-semantic-tool
-   registry runtime "record-falsifier"
-   "Record the falsifier: the observable result that would reject the hypothesis."
-   (list "path" "string" "falsifier" "string") (list "path" "falsifier")
-   :write
-   (lambda (args)
-     (append-research-update
-      (ensure-path-in-store%/ (ar-store runtime)
-                              (require-string-field args "path"))
-      :findings (format nil "Falsifier: ~a"
-                        (require-string-field args "falsifier")))))
-  (register-semantic-tool
-   registry runtime "record-unresolved-question"
-   "Record one explicitly unresolved question on a research node."
-   (list "path" "string" "question" "string") (list "path" "question")
-   :write
-   (lambda (args)
-     (append-research-update
-      (ensure-path-in-store%/ (ar-store runtime)
-                              (require-string-field args "path"))
-      :findings (format nil "Unresolved question: ~a"
-                        (require-string-field args "question")))))
-  (register-semantic-tool
-   registry runtime "record-research-pass"
-   "Record one completed research pass (findings plus optional sources/commits) on a research node."
-   (list "path" "string" "finding" "string" "source" "string" "commit" "string")
-   (list "path" "finding")
-   :write
-   (lambda (args)
-     (append-research-update
-      (ensure-path-in-store%/ (ar-store runtime)
-                              (require-string-field args "path"))
-      :findings (require-string-field args "finding")
-      :sources (when (gethash "source" args)
-                 (list (gethash "source" args)))
-      :commits (when (gethash "commit" args)
-                 (list (gethash "commit" args))))))
+  (flet ((note-artifact (path)
+           (ar-note-research-artifact runtime *ar-current-run-id* path)))
+    (register-semantic-tool
+     registry runtime "record-source"
+     "Record one retrieved source (URL or citation text) with its retrieval date on a research node."
+     (list "path" "string" "source" "string") (list "path" "source")
+     :write
+     (lambda (args)
+       (let* ((path (ensure-path-in-store%/ (ar-store runtime)
+                                            (require-string-field args "path")))
+              (source (require-string-field args "source")))
+         (append-research-update path :sources (list source))
+         (note-artifact path)
+         (ar-note-evidence runtime *ar-current-run-id* :source path source)
+         (sar.i:dict "recorded" (enough-namestring path (org-roam-root (ar-store runtime)))))))
+    (register-semantic-tool
+     registry runtime "record-finding"
+     "Record one bounded finding on a research node."
+     (list "path" "string" "finding" "string") (list "path" "finding")
+     :write
+     (lambda (args)
+       (let* ((path (ensure-path-in-store%/ (ar-store runtime)
+                                            (require-string-field args "path")))
+              (finding (require-string-field args "finding")))
+         (append-research-update path :findings finding)
+         (note-artifact path)
+         (ar-note-evidence runtime *ar-current-run-id* :finding path finding)
+         (sar.i:dict "recorded" (enough-namestring path (org-roam-root (ar-store runtime)))))))
+    (register-semantic-tool
+     registry runtime "record-counterevidence"
+     "Record contrary evidence on a research node. Every material claim needs explicit contrary evidence."
+     (list "path" "string" "evidence" "string") (list "path" "evidence")
+     :write
+     (lambda (args)
+       (let* ((path (ensure-path-in-store%/ (ar-store runtime)
+                                            (require-string-field args "path")))
+              (evidence (require-string-field args "evidence")))
+         (append-research-update
+          path
+          :findings (format nil "Counterevidence: ~a" evidence))
+         (note-artifact path)
+         (ar-note-evidence runtime *ar-current-run-id* :counterevidence path evidence)
+         (sar.i:dict "recorded" (enough-namestring path (org-roam-root (ar-store runtime)))))))
+    (register-semantic-tool
+     registry runtime "record-falsifier"
+     "Record the falsifier: the observable result that would reject the hypothesis."
+     (list "path" "string" "falsifier" "string") (list "path" "falsifier")
+     :write
+     (lambda (args)
+       (let* ((path (ensure-path-in-store%/ (ar-store runtime)
+                                            (require-string-field args "path")))
+              (falsifier (require-string-field args "falsifier")))
+         (append-research-update
+          path
+          :findings (format nil "Falsifier: ~a" falsifier))
+         (note-artifact path)
+         (ar-note-evidence runtime *ar-current-run-id* :finding path
+                           (format nil "Falsifier: ~a" falsifier))
+         (sar.i:dict "recorded" (enough-namestring path (org-roam-root (ar-store runtime)))))))
+    (register-semantic-tool
+     registry runtime "record-unresolved-question"
+     "Record one explicitly unresolved question on a research node."
+     (list "path" "string" "question" "string") (list "path" "question")
+     :write
+     (lambda (args)
+       (let* ((path (ensure-path-in-store%/ (ar-store runtime)
+                                            (require-string-field args "path")))
+              (question (require-string-field args "question")))
+         (append-research-update
+          path
+          :findings (format nil "Unresolved question: ~a" question))
+         (note-artifact path)
+         (ar-note-evidence runtime *ar-current-run-id* :unresolved-question path question)
+         (sar.i:dict "recorded" (enough-namestring path (org-roam-root (ar-store runtime)))))))
+    (register-semantic-tool
+     registry runtime "record-research-pass"
+     "Record one completed research pass (findings plus optional sources/commits) on a research node."
+     (list "path" "string" "finding" "string" "source" "string" "commit" "string")
+     (list "path" "finding")
+     :write
+     (lambda (args)
+       (let* ((path (ensure-path-in-store%/ (ar-store runtime)
+                                            (require-string-field args "path")))
+              (finding (require-string-field args "finding"))
+              (source (and (gethash "source" args) (gethash "source" args))))
+         (append-research-update
+          path
+          :findings finding
+          :sources (when source (list source))
+          :commits (when (gethash "commit" args)
+                     (list (gethash "commit" args))))
+          (note-artifact path)
+          (ar-note-evidence runtime *ar-current-run-id* :finding path finding)
+          (when source
+            (ar-note-evidence runtime *ar-current-run-id* :source path source))
+          (sar.i:dict "recorded" (enough-namestring path (org-roam-root (ar-store runtime))))))))
   (register-semantic-tool
    registry runtime "submit-candidate"
    "Submit a bounded research candidate with hypothesis, predicted result, and falsifier. Optional: one primary evidence citation, one acceptance criterion, and one rejected alternative. Returns the candidate id."
@@ -241,7 +358,7 @@ RUNTIME. Returns the registry."
        (sar.i:dict "candidate_id" id))))
   (register-semantic-tool
    registry runtime "record-design-note"
-   "Record the bounded design note for this run as a canonical design node. CL serializes the design; the model supplies structured text only."
+   "Record the bounded design note for this run as a canonical design node. CL serializes the design plus the canonical Research Basis / Evidence Used provenance sections derived from the run evidence bundle; the model supplies structured text only."
    (list "run_id" "string" "design" "string") (list "run_id" "design")
    :write
    (lambda (args)
@@ -249,10 +366,18 @@ RUNTIME. Returns the registry."
             (slug (or (ar-run-project-slug runtime run-id)
                       (error 'research-core:validation-error
                              :message (format nil "unknown run: ~a" run-id))))
-            (path (write-design-node (ar-store runtime) slug run-id
-                                     (format nil "Design ~a" run-id)
-                                     (require-string-field args "design"))))
-       (sar.i:dict "path" (enough-namestring path (org-roam-root (ar-store runtime)))))))
+            (run (or (ar-get-run runtime run-id)
+                     (error 'research-core:validation-error
+                            :message (format nil "unknown run: ~a" run-id))))
+            (bundle (run-evidence-bundle runtime run)))
+       (multiple-value-bind (path)
+           (write-design-node
+            (ar-store runtime) slug run-id
+            (format nil "Design ~a" run-id)
+            (require-string-field args "design")
+            :research-basis (design-basis-items runtime bundle)
+            :evidence-rows (design-evidence-rows bundle))
+         (sar.i:dict "path" (enough-namestring path (org-roam-root (ar-store runtime))))))))
   (register-semantic-tool
    registry runtime "record-design-review"
    "Record one bounded design review with an explicit verdict on this run's design note."
@@ -325,3 +450,63 @@ unauthorized absolute paths, and symlink escapes."
         (error 'research-core:validation-error
                :message (format nil "symlink escape rejected: ~a" path))))
     full))
+
+;;; ------------------------------------------------- source repository tools
+;;;
+;;; The research corpus (org-roam store) and the SOURCE repository being
+;;; researched are distinct. The repository-* tools expose safe, read-only
+;;; operations against the SOURCE repository configured on the active
+;;; run's project; they never read or write the corpus, and they never
+;;; grant write access.
+
+(defun current-run-project (runtime)
+  "The project of the run currently executing a semantic stage, or nil
+outside a run."
+  (when *ar-current-run-id*
+    (let ((run (ar-get-run runtime *ar-current-run-id*)))
+      (when run
+        (let ((request (ar-get-request runtime
+                                       (research-core:run-request-id run))))
+          (when request
+            (find-project-config
+             (project-config-id
+              (research-core:request-project request)))))))))
+
+(defun ensure-repository-path (runtime path)
+  "Resolve PATH beneath the ACTIVE RUN's configured source repository
+root; reject traversal and symlink escapes. Errors when the run's
+project configures no source repository: repository tools must never be
+confused with corpus reads."
+  (let* ((project (current-run-project runtime))
+         (root (and project (project-config-source-path project))))
+    (unless root
+      (error 'research-core:validation-error
+             :message (format nil
+                              "repository tools require a source repository; project ~a configures none"
+                              (if project (project-config-id project) "<no run>"))))
+    (let* ((full (merge-pathnames (or path "") (pathname root)))
+           (resolved (probe-file full)))
+      (unless (and resolved (uiop:subpathp resolved (pathname root)))
+        (error 'research-core:validation-error
+               :message (format nil "path is outside the configured source repository: ~a" path)))
+      (unless (uiop:subpathp (truename resolved) (truename (pathname root)))
+        (error 'research-core:validation-error
+               :message (format nil "symlink escape rejected: ~a" path)))
+      resolved)))
+
+(defun repository-label (runtime)
+  "Provenance label of the source repository the repository tools read."
+  (let ((project (current-run-project runtime)))
+    (and project (project-config-repository project))))
+
+(defun note-repository-observation (runtime path tool)
+  (ar-note-evidence runtime *ar-current-run-id* :repository-observation
+                    nil
+                    (format nil "~a ~a [~a]"
+                            tool
+                            (enough-namestring path (current-repository-root runtime))
+                            (or (repository-label runtime) "unknown"))))
+
+(defun current-repository-root (runtime)
+  (let ((project (current-run-project runtime)))
+    (and project (project-config-source-path project))))

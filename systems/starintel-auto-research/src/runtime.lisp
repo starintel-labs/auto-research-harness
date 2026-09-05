@@ -20,11 +20,15 @@
    (event-store :initarg :event-store :reader ar-event-store)
    (operator :initarg :operator :reader ar-operator)
    (provider :initarg :provider :initform nil :reader ar-provider)
-   (runs :initform (make-hash-table :test #'equal) :reader ar-runs-table)
-   (requests :initform (make-hash-table :test #'equal) :reader ar-requests-table)
-   (candidates :initform (make-hash-table :test #'equal) :reader ar-candidates)
-   (revision-counts :initform (make-hash-table :test #'equal)
-                    :reader ar-revision-counts)))
+    (runs :initform (make-hash-table :test #'equal) :reader ar-runs-table)
+    (requests :initform (make-hash-table :test #'equal) :reader ar-requests-table)
+    (candidates :initform (make-hash-table :test #'equal) :reader ar-candidates)
+    (revision-counts :initform (make-hash-table :test #'equal)
+                     :reader ar-revision-counts)
+    (run-artifacts :initform (make-hash-table :test #'equal)
+                   :reader ar-run-artifacts-slot)
+    (run-evidence :initform (make-hash-table :test #'equal)
+                  :reader ar-run-evidence-slot)))
 
 (defun make-ar-runtime (root &key forgejo rlm-registry provider
                                   (operator "auto-research-runtime"))
@@ -138,10 +142,14 @@ deterministic issue title. Returns (values issue-number created-p)."
 
 ;;; -------------------------------------------------- submission (API path)
 
-(defun ar-submit-research (runtime project question &key (source :api) issue-ref)
+(defun ar-submit-research (runtime project question &key (source :api) issue-ref
+                                                     input-kind input-path)
   "API-origin request: canonical request -> issue in the configured
 research repo -> ARDR issue transaction -> run. Returns
-(values request run issue-number existing-issue-p)."
+(values request run issue-number existing-issue-p). INPUT-KIND and
+INPUT-PATH record the resolved invocation shape (file | text and, when
+applicable, the file) as request provenance; the project identity is
+the explicitly resolved PROJECT and is immutable afterwards."
   (multiple-value-bind (issue-number created-p)
       (forgejo-ensure-issue runtime project question)
     (let* ((request-id (sar.i:short-id "req"))
@@ -152,6 +160,8 @@ research repo -> ARDR issue transaction -> run. Returns
                                    :question question
                                    :source source
                                    :issue-ref issue-ref
+                                   :input-kind input-kind
+                                   :input-path input-path
                                    :status :received
                                    :run-ids (list run-id)
                                    :created-at (sar.i:now-iso8601)))
@@ -166,7 +176,10 @@ research repo -> ARDR issue transaction -> run. Returns
       (ar-record-event runtime :request.received request-id
                        :next-state :received
                        :payload (sar.i:dict "question" question
-                                            "source" (string-downcase (symbol-name source))))
+                                            "source" (string-downcase (symbol-name source))
+                                            "project" (project-config-id project)
+                                            "input_kind" (and input-kind (string-downcase (symbol-name input-kind)))
+                                            "input_path" input-path))
       (ar-record-event runtime :run.created run-id :next-state :queued
                        :payload (sar.i:dict "request_id" request-id))
       (when issue-number
@@ -393,7 +406,7 @@ real semantic stages get explicit headroom."
     (:research "search the corpus and record findings with sources; then submit exactly one candidate with hypothesis, predicted result, falsifier, one primary evidence citation, one acceptance criterion, and one rejected alternative")
     (:adversarial-review "record exactly one independent adversarial review per candidate with numeric scores; veto only when the candidate must be rejected")
     (:analysis "record counterevidence and unresolved questions for every material contrary point raised by the reviews")
-    (:design "record the bounded design note for this run covering invariants, actors, and rejected alternatives")
+    (:design "derive the design strictly from the recorded run evidence in the context: every significant decision must cite concrete findings, sources, or candidate evidence from this run; mark anything not directly supported by evidence as an explicit inference; never state invariants, actors, or rejected alternatives that do not occur in the evidence")
     (:design-review "read the design note and record one design review with an explicit verdict")
     (:promotion-gate "deterministic gate; no model calls")))
 
@@ -404,8 +417,10 @@ real semantic stages get explicit headroom."
           (cdr (assoc :falsifier candidate))))
 
 (defun ar-stage-context-data (runtime run stage)
-  "Stage-specific bounded data (candidate summaries) for the context."
-  (when (member stage '(:adversarial-review :analysis :design :design-review))
+  "Stage-specific bounded data for the context: candidate summaries for
+the review stages. DESIGN receives the bounded projection of the
+canonical run evidence bundle instead (see make-ar-stage-context)."
+  (when (member stage '(:adversarial-review :analysis :design-review))
     (let ((candidates (ar-run-candidates runtime (research-core:run-id run))))
       (when candidates
         (format nil "~{~a~^~%~}" (mapcar #'candidate-summary candidates))))))
@@ -413,15 +428,22 @@ real semantic stages get explicit headroom."
 (defun make-ar-stage-context (runtime run request project stage)
   "Bounded per-stage context builder: never the whole corpus, never an
 ever-growing transcript. Project identity, question, stage requirements,
-and stage data only."
+the project prompt profile, and stage data only. The DESIGN stage
+receives the deterministic projection of the run evidence bundle so the
+design is grounded in recorded evidence, not candidate prose alone."
   (rlm:make-context
-   (format nil "project: ~a~%roam subtree: ~a~%question: ~a~%stage: ~a~%stage requirements: ~a~%~a"
+   (format nil "project: ~a~%roam subtree: ~a~%question: ~a~%stage: ~a~%stage requirements: ~a~%~a~a"
            (project-config-id project)
            (project-config-roam-slug project)
            (research-core:request-question request)
            (stage-name stage)
            (ar-stage-requirement stage)
-           (or (ar-stage-context-data runtime run stage) ""))
+           (or (project-prompt-context runtime project stage) "")
+           (or (if (eq stage :design)
+                   (project-evidence-bundle
+                    (run-evidence-bundle runtime run))
+                   (ar-stage-context-data runtime run stage))
+               ""))
    :max-bytes 8192))
 
 (defun ar-context-directive ()
@@ -454,7 +476,7 @@ query never lets the model choose them."
              (research-core:run-id run)
              (ar-context-directive)))
     (:design
-     (format nil "DESIGN stage for project ~a, run ~a. Call record-design-note once with run_id ~a and a bounded design covering invariants, actors, and rejected alternatives. ~a"
+     (format nil "DESIGN stage for project ~a, run ~a. The context contains the run evidence projection (identity, candidates, findings, sources, counterevidence, research artifacts). Call record-design-note once with run_id ~a and a bounded design derived ONLY from that evidence: cite concrete findings, sources, or candidate evidence for every significant decision, and mark anything not directly supported as an explicit inference. Never state generic invariants, actors, or rejected alternatives that do not occur in the evidence. ~a"
              (project-config-id project)
              (research-core:run-id run)
              (research-core:run-id run)
@@ -516,75 +538,88 @@ failures are terminal."
 (defun ar-execute-stage (runtime run request project stage)
   "Execute one stage: semantic work where the stage requires it, and the
 deterministic checks, completion requirements, and candidate lifecycle
-transitions owned by CL. Ordinary checks never spend LLM calls."
-  (ecase stage
-    (:request
-     ;; deterministic: an issue-backed request must have its durable ARDR
-     ;; transaction node before any semantic work starts
-     (let ((ref (research-core:request-issue-ref request)))
-       (when ref
-         (unless (find-ardr-issue-transaction
-                  (ar-store runtime)
-                  (research-core:issue-ref-instance ref)
-                  (research-core:issue-ref-repository ref)
-                  (research-core:issue-ref-number ref))
+transitions owned by CL. Ordinary checks never spend LLM calls. Semantic
+tool activity is attributed to this run through *ar-current-run-id*."
+  (let ((*ar-current-run-id* (research-core:run-id run)))
+    (ecase stage
+      (:request
+       ;; deterministic: an issue-backed request must have its durable ARDR
+       ;; transaction node before any semantic work starts
+       (let ((ref (research-core:request-issue-ref request)))
+         (when ref
+           (unless (find-ardr-issue-transaction
+                    (ar-store runtime)
+                    (research-core:issue-ref-instance ref)
+                    (research-core:issue-ref-repository ref)
+                    (research-core:issue-ref-number ref))
+             (error 'ar-stage-error :stage stage
+                    :message "issue-backed request lacks its ARDR transaction node")))))
+      (:research
+       (ar-invoke-semantic-stage runtime run request project stage)
+       (let ((candidates (ar-run-candidates runtime (research-core:run-id run))))
+         (unless candidates
            (error 'ar-stage-error :stage stage
-                  :message "issue-backed request lacks its ARDR transaction node")))))
-    (:research
-     (ar-invoke-semantic-stage runtime run request project stage)
-     (let ((candidates (ar-run-candidates runtime (research-core:run-id run))))
-       (unless candidates
-         (error 'ar-stage-error :stage stage
-                :message "research produced no candidate"))
-       (dolist (candidate candidates)
-         (when (eq (cdr (assoc :state candidate)) :queued)
-           (ar-candidate-transition runtime (cdr (assoc :id candidate)) :exploring)))))
-    (:adversarial-review
-     (let ((candidates (ar-run-candidates runtime (research-core:run-id run)))
-           (known-ids (loop :for id :being :the :hash-keys :of (ar-candidates runtime)
-                            :collect id)))
-       ;; deterministic checks first: no LLM calls spent on ordinary checks
-       (dolist (candidate candidates)
-         (aradr:check-required-fields
-          candidate '(:problem :hypothesis :predicted-result :falsifier))
-         (aradr:check-parent-ids candidate known-ids))
-       ;; proposal complete -> validation passed -> entering virtual review
-       (dolist (candidate candidates)
-         (let ((id (cdr (assoc :id candidate))))
-           (when (eq (cdr (assoc :state candidate)) :exploring)
-             (ar-candidate-transition runtime id :proposing))
-           (when (eq (cdr (assoc :state (gethash id (ar-candidates runtime))))
-                     :proposing)
-             (ar-candidate-transition runtime id :validating))))
+                  :message "research produced no candidate"))
+         (dolist (candidate candidates)
+           (when (eq (cdr (assoc :state candidate)) :queued)
+             (ar-candidate-transition runtime (cdr (assoc :id candidate)) :exploring)))))
+      (:adversarial-review
+       (let ((candidates (ar-run-candidates runtime (research-core:run-id run)))
+             (known-ids (loop :for id :being :the :hash-keys :of (ar-candidates runtime)
+                              :collect id)))
+         ;; deterministic checks first: no LLM calls spent on ordinary checks
+         (dolist (candidate candidates)
+           (aradr:check-required-fields
+            candidate '(:problem :hypothesis :predicted-result :falsifier))
+           (aradr:check-parent-ids candidate known-ids))
+         ;; proposal complete -> validation passed -> entering virtual review
+         (dolist (candidate candidates)
+           (let ((id (cdr (assoc :id candidate))))
+             (when (eq (cdr (assoc :state candidate)) :exploring)
+               (ar-candidate-transition runtime id :proposing))
+             (when (eq (cdr (assoc :state (gethash id (ar-candidates runtime))))
+                       :proposing)
+               (ar-candidate-transition runtime id :validating))))
+         (ar-invoke-semantic-stage runtime run request project stage)
+         (dolist (candidate (ar-run-candidates runtime (research-core:run-id run)))
+           (unless (cdr (assoc :reviews candidate))
+             (error 'ar-stage-error :stage stage
+                    :message (format nil "candidate ~a has no adversarial review"
+                                     (cdr (assoc :id candidate)))))
+           (when (eq (cdr (assoc :state candidate)) :validating)
+             (ar-candidate-transition runtime (cdr (assoc :id candidate))
+                                      :virtual-review)))))
+      (:analysis
        (ar-invoke-semantic-stage runtime run request project stage)
        (dolist (candidate (ar-run-candidates runtime (research-core:run-id run)))
-         (unless (cdr (assoc :reviews candidate))
+         (when (eq (cdr (assoc :state candidate)) :virtual-review)
+           (ar-candidate-transition runtime (cdr (assoc :id candidate)) :evaluated))))
+      (:design
+       ;; NO EVIDENCE -> NO DESIGN: deterministic gate evaluated on the
+       ;; canonical run evidence bundle BEFORE any semantic work; a design
+       ;; stage must refuse to advance without a research basis.
+       (let ((problem (evidence-grounding-problem runtime run)))
+         (when problem
            (error 'ar-stage-error :stage stage
-                  :message (format nil "candidate ~a has no adversarial review"
-                                   (cdr (assoc :id candidate)))))
-         (when (eq (cdr (assoc :state candidate)) :validating)
-           (ar-candidate-transition runtime (cdr (assoc :id candidate))
-                                    :virtual-review)))))
-    (:analysis
-     (ar-invoke-semantic-stage runtime run request project stage)
-     (dolist (candidate (ar-run-candidates runtime (research-core:run-id run)))
-       (when (eq (cdr (assoc :state candidate)) :virtual-review)
-         (ar-candidate-transition runtime (cdr (assoc :id candidate)) :evaluated))))
-    (:design
-     (ar-invoke-semantic-stage runtime run request project stage)
-     (unless (probe-file (design-node-path (ar-store runtime)
-                                           (project-config-roam-slug project)
-                                           (research-core:run-id run)))
-       (error 'ar-stage-error :stage stage
-              :message "design stage produced no design node")))
-    (:design-review
-     (ar-invoke-semantic-stage runtime run request project stage)
-     (unless (design-reviewed-p
-              (design-node-path (ar-store runtime)
-                                (project-config-roam-slug project)
-                                (research-core:run-id run)))
-       (error 'ar-stage-error :stage stage
-              :message "design review not recorded")))))
+                  :message (format nil "no-evidence-no-design: ~a" problem))))
+       (ar-invoke-semantic-stage runtime run request project stage)
+       ;; structural validation: a design does not count as valid merely
+       ;; because its file exists
+       (multiple-value-bind (valid reasons)
+           (validate-design-node (ar-store runtime)
+                                 (project-config-roam-slug project)
+                                 (research-core:run-id run))
+         (unless valid
+           (error 'ar-stage-error :stage stage
+                  :message (format nil "design validation failed: ~{~a~^; ~}" reasons)))))
+      (:design-review
+       (ar-invoke-semantic-stage runtime run request project stage)
+       (unless (design-reviewed-p
+                (design-node-path (ar-store runtime)
+                                  (project-config-roam-slug project)
+                                  (research-core:run-id run)))
+         (error 'ar-stage-error :stage stage
+                :message "design review not recorded"))))))
 
 (defun ar-aggregate-review-score (reviews dimension)
   "Mean of one numeric review dimension across all recorded reviews; nil
@@ -601,12 +636,31 @@ when no review recorded a score for it."
 a veto.")
 
 (defun ar-promotion-gate-stage (runtime run)
-  "The deterministic promotion gate: run vetoes and the gate for every
-evaluated candidate using the aggregated review scores. Denial is a
+  "The deterministic promotion gate: run vetoes, design validity, and
+the gate for every evaluated candidate using the aggregated review
+scores. A candidate can never reach :promoted while its required design
+stage is invalid or pending: the design is structurally validated first
+and an invalid design denies every candidate of the run. Denial is a
 recorded outcome, not a crash; the run completes without promoting when
 the gate denies. Promotion never activates an implementation slot and
 never implies implementation approval."
-  (let ((promoted) (denied))
+  (let* ((request (ar-get-request runtime (research-core:run-request-id run)))
+         (project (and request
+                       (find-project-config
+                        (project-config-id
+                         (research-core:request-project request)))))
+         ;; project-specific policy: ARADR runs require a valid design;
+         ;; methods without a design stage are exempt
+         (design-required (and project (eq (project-config-method project) :aradr)))
+         (design-reasons
+           (when design-required
+             (multiple-value-bind (valid reasons)
+                 (validate-design-node (ar-store runtime)
+                                       (project-config-roam-slug project)
+                                       (research-core:run-id run))
+               (unless valid reasons))))
+         (promoted)
+         (denied))
     (dolist (candidate (ar-run-candidates runtime (research-core:run-id run)))
       (let* ((id (cdr (assoc :id candidate)))
              (vetoes (aradr:run-vetoes candidate))
@@ -614,6 +668,11 @@ never implies implementation approval."
              (evidence (ar-aggregate-review-score reviews "evidence"))
              (architecture (ar-aggregate-review-score reviews "architecture")))
         (cond
+          (design-reasons
+           (push (sar.i:dict "candidate" id
+                             "reasons" (append (list "design validation failed")
+                                               design-reasons))
+                 denied))
           ((or (null evidence) (null architecture))
            (push (sar.i:dict "candidate" id
                              "reasons" (list "no recorded evidence/architecture review scores"))
@@ -707,13 +766,32 @@ auto-started and approval remains PENDING."
 (defun promote-candidate (runtime candidate-id scores thresholds)
   "Run ARADR promotion guards for CANDIDATE and, on success, record the
 promotion transition to :promoted. Denials raise aradr:promotion-denied
-with all reasons and leave the candidate untouched. Promotion never
-activates an implementation slot and never implies implementation
-approval."
+with all reasons and leave the candidate untouched. A candidate whose
+run requires a design stage (project method :aradr) cannot be promoted
+while its design node is structurally invalid. Promotion never activates
+an implementation slot and never implies implementation approval."
   (let* ((candidate (or (gethash candidate-id (ar-candidates runtime))
                         (error 'research-core:validation-error
                                :message (format nil "unknown candidate: ~a" candidate-id))))
-         (vetoes (aradr:run-vetoes candidate)))
+         (vetoes (aradr:run-vetoes candidate))
+         (run (and (cdr (assoc :run-id candidate))
+                   (ar-get-run runtime (cdr (assoc :run-id candidate)))))
+         (request (and run (ar-get-request runtime
+                                           (research-core:run-request-id run))))
+         (project (and request
+                       (find-project-config
+                        (project-config-id
+                         (research-core:request-project request)))))
+         (design-reasons
+           (when (and project (eq (project-config-method project) :aradr) run)
+             (multiple-value-bind (valid reasons)
+                 (validate-design-node (ar-store runtime)
+                                       (project-config-roam-slug project)
+                                       (research-core:run-id run))
+               (unless valid
+                 (append (list "design validation failed") reasons))))))
+    (when design-reasons
+      (error 'aradr:promotion-denied :reasons design-reasons))
     (aradr:promotion-gate candidate vetoes scores thresholds)
     (ar-candidate-transition runtime candidate-id :promoted)))
 

@@ -31,5 +31,7 @@
      (:file "ledgers")
      (:file "dsl")
      (:file "forgejo")
+     (:file "evidence")
+     (:file "prompts")
      (:file "tools")
      (:file "runtime")))))

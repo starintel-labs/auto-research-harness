@@ -42,6 +42,8 @@
    #:request-project
    #:request-question
    #:request-source
+   #:request-input-kind
+   #:request-input-path
    #:request-issue-ref
    #:request-status
    #:request-run-ids
@@ -84,6 +86,7 @@
 
    ;; conditions
    #:core-error
+   #:core-error-message
    #:authorization-error
    #:authentication-error
    #:validation-error
