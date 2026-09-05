@@ -205,3 +205,35 @@
               "token-operator")
       (declare (ignore response))
       (is (= 401 status)))))
+
+(test api-run-pending-triggers-and-authorizes
+  (with-test-api
+    ;; no token: authentication failure
+    (multiple-value-bind (response status)
+        (http :post "/api/v1/run-pending" "")
+      (declare (ignore response))
+      (is (= 401 status)))
+    ;; missing capability: authorization failure (readonly principal)
+    (multiple-value-bind (response status)
+        (http :post "/api/v1/run-pending" "{}" "token-readonly")
+      (declare (ignore response))
+      (is (= 403 status)))
+    ;; authorized: 202 accepted and a run advances past :queued
+    (multiple-value-bind (request run)
+        (ar:ar-submit-research web:*runtime*
+                               (ar:find-project-config "prolog-rlm")
+                               "Endpoint-triggered walk")
+      (declare (ignore request))
+      (multiple-value-bind (response status)
+          (http :post "/api/v1/run-pending" "{}" "token-operator")
+        (is (= 202 status))
+        (is (search "started" response))
+        ;; the worker thread walks stages without a provider; the run must
+        ;; leave :queued within a few seconds (fail-closed :unresolved)
+        (let ((deadline (+ (get-internal-real-time)
+                           (* 10 internal-time-units-per-second))))
+          (loop :while (and (eq :queued (rc:run-status run))
+                            (< (get-internal-real-time) deadline))
+                :do (sleep 0.2))
+          (is (member (rc:run-status run)
+                      '(:running :completed :unresolved :failed))))))))

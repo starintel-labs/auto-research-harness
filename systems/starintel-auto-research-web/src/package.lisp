@@ -2,6 +2,7 @@
 
 (defpackage #:starintel-auto-research-web
   (:use #:cl)
+  (:local-nicknames (:bt :bordeaux-threads))
   (:local-nicknames (:jz :com.inuoe.jzon)
                     (:rc :research-core)
                     (:rci :research-core/internal)

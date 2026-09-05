@@ -87,6 +87,32 @@ or nil. Used by handle-api clauses."
       (error 'rc:validation-error
              :message (format nil "unknown project: ~a" project-id))))
 
+(defun handle-run-pending ()
+  "Trigger ar-run-pending for queued runs. The stage walk executes in a
+worker thread (a full walk may take minutes); the response is 202 and
+progress is observable through run events / SSE. An optional body
+{\"project_id\": \"...\"} scopes the walk to one project."
+  (with-auth (:|runtime:inspect|)
+    (unless (eq (hunchentoot:request-method*) :post)
+      (return-from handle-run-pending (json-error 405 "method not allowed")))
+    (let* ((body (ignore-errors (read-json-body)))
+           (project-id (and body (gethash "project_id" body))))
+      (bt:make-thread
+       (lambda ()
+         (handler-case
+             (if project-id
+                 (ar:ar-run-pending *runtime* :project-id project-id)
+                 (ar:ar-run-pending *runtime*))
+           (error (condition)
+             (format *error-output* "~&run-pending worker failed: ~a~%" condition))))
+       :name "ar-run-pending-worker")
+      (setf (hunchentoot:return-code*) 202)
+      (json-ok (alexandria:plist-hash-table
+                (list "started" t
+                      "project_id" (or project-id "all"))
+                :test #'equal)
+               202))))
+
 (defun project-resource (project-id resource method)
   (with-auth (:|research:read|)
     (project-config-or-404 project-id)
@@ -128,6 +154,8 @@ or nil. Used by handle-api clauses."
      (destructuring-bind (project-id resource)
          (route-params "^/api/v1/projects/([^/]+)/(research|designs|runs|issues|artifacts|dashboard)$" path)
        (project-resource project-id resource method)))
+    ((string= path "/api/v1/run-pending")
+     (handle-run-pending))
     ;; requests and runs --------------------------------------------------
     ((and (string= path "/api/v1/requests") (eq method :get))
      (with-auth (:|research:read|)
